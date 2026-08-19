@@ -1,0 +1,29 @@
+% Wrapper only. The prose lives in vcc2026-metrics.md; build.sh converts it to build/body.tex.
+\documentclass[11pt,a4paper,oneside]{report}
+\input{preamble}
+
+\begin{document}
+
+\pagenumbering{roman}
+\thispagestyle{empty}
+
+\vspace*{2.2cm}
+\begin{center}
+  % Mirrors the Markdown's own title block, which build.sh strips before pandoc sees it.
+  {\LARGE\bfseries The \code{vcc2026} Metric Suite}\\[22pt]
+  {\small 2026/08/18}
+\end{center}
+
+\vfill
+\clearpage
+
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+% The Markdown numbers its sections from 0 (the overview). Start the chapter counter one
+% below so LaTeX's own numbering agrees with the source rather than contradicting it.
+\setcounter{chapter}{-1}
+\input{build/body}
+
+\end{document}
