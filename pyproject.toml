@@ -1,0 +1,118 @@
+[project]
+name = "cell-eval2"
+version = "0.16.0"
+description = "Clean, streamlined, GPU-accelerated reimplementation of cell-eval"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anndata>=0.10",
+    "numpy>=1.26",
+    "polars>=1.0",
+    "scanpy>=1.10",
+    "scipy>=1.11",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# cellstream is the public successor to the private `shardad` (shardad#215). It is a PyPI
+# dependency, not a git reference: `ArcInstitute/shardad` is NOT going public, so the old
+# `git+https://.../shardad.git@v0.7.1` form was unresolvable for every reader outside Arc and
+# `pip install 'cell-eval2[scale]'` failed for them.
+# ⚠️ THE FLOOR IS 0.9.1, AND THE .1 IS LOAD-BEARING -- it is a Python 3.13 guardrail, not a
+# version-currency habit. 0.9.1's payload is byte-identical to 0.9.0 (measured: 54 of 55 files in
+# the cp312 wheel hash the same, and the 55th differs only in the version literal inside
+# `_version.py`); the sole functional change is `requires-python` going `>=3.11` -> `>=3.11,<3.13`.
+# So on 3.11/3.12 the two are the same software and this pin buys nothing.
+# It buys everything on 3.13, because of how resolvers read requires-python:
+#     `cellstream>=0.9.0` on 3.13 -> 0.9.1 is EXCLUDED by its own cap, 0.9.0 still SATISFIES the
+#                                    spec, so 0.9.0 installs SILENTLY. And 0.9.0 on 3.13 is the
+#                                    dangerous build: it installs, imports, reports `rust=yes`,
+#                                    and then fails NON-DETERMINISTICALLY (upstream #362).
+#     `cellstream>=0.9.1` on 3.13 -> no candidate at all. The install fails LOUDLY, which is the
+#                                    only acceptable outcome for a build that is unsafe rather
+#                                    than unavailable.
+# This holds whether or not 0.9.0 is ever yanked, so it protects us independently of index
+# housekeeping. It is also why cell_eval2 does NOT need `<3.13` on its own `requires-python`: the
+# constraint lives on the dependency that actually has it, and does not propagate to consumers.
+# The API was verified symbol-for-symbol against this code -- `read.ShardedArchive`,
+# `write_sharded`, `read_h5ad`, `packed.is_packed_file`, `packed.reader.PackedArchive`,
+# `cell.open_cell`, `cell.write_cell_archive`, and
+# `CellStore.gather_rows_adata`/`n_threads`/`_load_groups`. The rename was a namespace swap: no
+# call site changed shape.
+# ⚠️ Wheels are cp311/cp312 on **glibc x86-64 Linux** only (`manylinux_2_28_x86_64`). macOS,
+# Windows, ARM Linux and PyPy all fall through to the sdist and need a Rust toolchain. Our CI
+# matrix is 3.11/3.12 on ubuntu, which the wheels cover exactly.
+scale = ["cellstream>=0.9.1"]
+# nvidia-nvcomp-cu12: cellstream's GPU .shad decode (read_v2_subset_to_device) needs nvCOMP in
+# addition to cupy; without it the scale/streaming GPU tests fail at import instead of running.
+# ⚠️ DELIBERATELY UNPINNED, while `cellstream[gpu]` pins `nvidia-nvcomp-cu12>=4,<5`. We resolve
+# 5.3.0.16 and nothing enforces cellstream's cap, because `scale` takes BARE `cellstream` and this
+# extra supplies the GPU half, so the two never resolve together. That is a real, unenforced
+# divergence -- so it was MEASURED rather than assumed, on an H100 (driver 12.6, cupy 14.1.1,
+# nvcomp 5.3.0.16, cellstream 0.9.0):
+#   * the 254 tests in the 18 cellstream-gated modules: 254 passed, 0 failed, 0 skipped;
+#   * a real schema-3 `.shad` written with `write_sharded` and decoded through the GPU path
+#     (`ShardedArchive.to_cupy_anndata`, which is what routes to nvCOMP) returned a total
+#     IDENTICAL to the CPU decode -- 71888.0 both ways, bit for bit.
+# So v5 works for the paths we use, and adopting `>=4,<5` would downgrade a verified stack to
+# satisfy an upstream cap that is conservative for our case. If a future cellstream DOES break on
+# v5, this comment is the note to read: the bound is not enforced, so nothing will warn you.
+gpu = ["cupy-cuda12x", "nvidia-nvcomp-cu12"]
+# gpudge is the GPU DE engine that `de.backend="auto"` selects when a CUDA device is visible, and
+# it drives four of the six scored `vcc2026` members. It is its OWN extra rather than part of
+# `gpu` on purpose: `gpu` is cupy + nvCOMP for the pseudobulk/rank kernels, while gpudge pulls
+# `torch>=2.5`, so folding it in would add torch to everyone who wants only the kernels.
+# ⚠️ Its SHARED dependency floors are tighter than cell_eval2's own (anndata>=0.12, numpy>=2,
+# polars>=1.38, pyarrow>=20, scipy>=1.17), so installing this extra raises those floors for the
+# environment; it also adds `hdf5plugin>=6` and `torch>=2.5`, which cell_eval2 does not otherwise
+# require. That is the cost of declaring it and it is why it is opt-in.
+# SCOPE: this covers the in-memory and cell-layout GPU DE paths (which drive gpudge through
+# `_refpool`). The SHARD-streaming path -- `score_streaming` -> `gpudge.de(shard_archive=...)` --
+# additionally needs gpudge's own `streaming` extra. That extra pins `cellstream>=0.9.0`, which
+# `scale` above already satisfies, so `.[scale,gpu,gpudge]` no longer resolves-then-fails at
+# import: they agree on one package. Nothing further is needed -- an extra only adds dependencies,
+# and `gpudge[streaming]`'s SOLE dependency is cellstream, which `[scale]` provides. This is the
+# half of #358 M1 the migration closed.
+# ⚠️ But gpudge pins `>=0.9.0`, not `>=0.9.1`, so `gpudge[streaming]` is a SECOND DOOR to the
+# 3.13 hazard above: install it without our `[scale]` and a 3.13 resolver takes 0.9.0 silently,
+# exactly as ours would have. Our floor protects our own extra only; the fix for that door belongs
+# upstream in gpudge.
+# The 0.3.0 notes recorded a `[gpudge]` extra as future work, blocked on gpudge requiring Python
+# >=3.12 while cell_eval2 supports >=3.11. Both halves are gone: 0.9.0 is on PyPI (2026-08-19) as
+# a pure-Python `py3-none-any` wheel with `Requires-Python: >=3.11`.
+gpudge = ["gpudge>=0.9.0"]
+
+[project.scripts]
+cell-eval2 = "cell_eval2.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    # >=8.2 for `pytest.importorskip(..., exc_type=...)`: two tests guard an internal tool and
+    # pass the exception class explicitly, so a tool that exists and raises anything OTHER than
+    # ModuleNotFoundError fails loudly instead of skipping (pytest 8.x skips on any ImportError).
+    "pytest>=8.2",
+    "ruff>=0.6",
+    "scikit-learn>=1.3",
+    "cell-eval==0.7.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cell_eval2"]
+
+# Pin the lint rule set EXPLICITLY — ruff's *default* selection is not a stable contract.
+# ruff 0.16.0 widened its default from (E4, E7, E9, F) to a much broader set (I, RUF, BLE,
+# PLR, C4, UP, S, SIM, TRY, EXE, …), which turned `main` red on ~350 pre-existing violations
+# with no code change on our side. Declaring `select` versions the contract in the repo, keeps
+# ruff itself freely upgradable, and makes the next default expansion a no-op. Widening this
+# list is a deliberate, separately-reviewed cleanup, never a side effect of a ruff release.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+# "tests" so `from _helpers import ...` works under ANY import mode -- the default
+# `prepend` inserts the rootdir itself, `importlib` inserts nothing (see tests/_helpers.py).
+pythonpath = ["tools", "tests"]

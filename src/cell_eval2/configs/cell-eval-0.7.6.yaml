@@ -1,0 +1,39 @@
+# Reproduces upstream cell-eval 0.7.6 (7b623f0) + pdex 0.2.6 (435f7d6, abhinadduri gpu fork).
+# version=v1 drives upstream metric NAMES; numeric knobs are the validated hybrid recipe.
+metrics: full
+pert_col: target
+control: non-targeting
+version: v1
+control_source: pred
+input_type: lognorm
+max_counts_per_cell: 1000000000.0
+target_sum: 10000.0
+allow_discrete: false
+filter:
+  filter_gene_min_cpm_cell: 5.0
+num_threads: -1
+outdir: null
+discrimination:
+  distance: l1
+  rank_denominator: n
+  # v1-family preset: reproduces upstream cell-eval, so it keeps the legacy tie rule
+  tie_policy: position
+  exclude_target_gene: true
+  # v1-family preset: reproduces upstream cell-eval, so it keeps the legacy per-row
+  # exclusion rather than the #343 panel-wide one
+  exclusion_scope: row
+  embed_key: null
+de:
+  p_adj_threshold: 0.05
+  min_abs_log2fc: 0.0
+  sort_by: abs_log2_fold_change
+  method: wilcoxon
+  nan_lfc_policy: keep
+  backend: auto
+  replicate_col: null
+  mean_calc: geometric
+  epsilon: 1.0e-09
+  clip_value: null
+  fdr_scope: per_pert
+  auc_pval_floor: clip
+  auc_pval_floor_value: 1.0e-10

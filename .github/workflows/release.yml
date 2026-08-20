@@ -1,0 +1,133 @@
+name: release
+
+# Publish cell-eval2 to PyPI via **Trusted Publishing** (OIDC). There is deliberately NO API token
+# anywhere: this repository is public, and a long-lived upload credential in a public repository's
+# settings is precisely what Trusted Publishing exists to remove. PyPI holds a publisher bound to
+# this repo + this workflow filename + the `pypi` environment, and the short-lived OIDC token
+# minted below is the only authentication involved.
+#
+# ⚠️ PYPI IS IMMUTABLE. A published version can be yanked but never replaced, so the guards below
+# run BEFORE the upload and are the substance of this workflow, not decoration:
+#   1. the built version must equal the release tag -- no shipping 0.16.0 under a v0.17.0 tag;
+#   2. the metadata must carry NO direct (`@ git+...`) reference. PyPI rejects those outright,
+#      which is why cell-eval2 was unpublishable at ANY version until the `scale` extra stopped
+#      being a private git URL (#358). This guard turns that class of mistake into a failed job
+#      instead of a failed upload;
+#   3. the version must not already exist on PyPI -- fail with a sentence, not a raw 400.
+#
+# Actions are SHA-pinned rather than tag-pinned because this job holds `id-token: write`: a moved
+# tag on a dependency could otherwise mint a PyPI-authenticating token. The trailing comment keeps
+# the human version legible for upgrades. Both are the same majors `ci.yml` uses, proven here.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and run every guard, but upload nothing (default: yes)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: build, verify, publish
+    runs-on: ubuntu-latest
+    # Must match the environment named in the PyPI publisher config. It is also where a required
+    # reviewer hangs, so a release can be gated on a human even when a tag triggered it.
+    environment: pypi
+    permissions:
+      id-token: write # mint the OIDC token PyPI trusts; this REPLACES a stored password
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: uv build --out-dir dist
+
+      - name: Guard - one version, both artifacts, and it matches the release tag
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, sys
+          dist = sorted(p.name for p in pathlib.Path("dist").iterdir())
+          print("built:", dist)
+          whl = [n for n in dist if n.endswith(".whl")]
+          sdist = [n for n in dist if n.endswith(".tar.gz")]
+          if len(whl) != 1 or len(sdist) != 1:
+              sys.exit(f"expected exactly one wheel and one sdist, got {dist}")
+          version = re.search(r'^version = "(.+)"', pathlib.Path("pyproject.toml").read_text(), re.M).group(1)
+          print("pyproject version:", version)
+          if f"cell_eval2-{version}-" not in whl[0]:
+              sys.exit(f"wheel {whl[0]} does not carry version {version}")
+          tag = os.environ.get("TAG", "")
+          if tag:
+              want = tag[1:] if tag.startswith("v") else tag
+              if want != version:
+                  sys.exit(f"release tag {tag!r} implies version {want!r}, but pyproject says "
+                           f"{version!r}. Refusing: the tag and the artifact would disagree forever.")
+              print(f"tag {tag} agrees with the built version")
+          else:
+              print("no release tag (workflow_dispatch) - tag/version agreement not checked")
+          with pathlib.Path(os.environ["GITHUB_ENV"]).open("a") as fh:
+              fh.write(f"CEV2_VERSION={version}\n")
+          PY
+
+      - name: Guard - the metadata carries no direct reference (PyPI rejects them)
+        run: |
+          python - <<'PY'
+          import pathlib, sys, zipfile
+          whl = next(p for p in pathlib.Path("dist").iterdir() if p.suffix == ".whl")
+          z = zipfile.ZipFile(whl)
+          md = z.read(next(n for n in z.namelist() if n.endswith("METADATA"))).decode()
+          reqs = [l for l in md.splitlines() if l.startswith("Requires-Dist:")]
+          # A direct reference is an `@` in the requirement itself, i.e. before any `;` marker.
+          # `pkg>=1; extra == "x"` is fine; `pkg @ git+https://...` is not, extras included.
+          direct = [r for r in reqs if "@" in r.split(";")[0]]
+          print(f"{len(reqs)} Requires-Dist, {len(direct)} direct")
+          if direct:
+              print("\n".join("  " + d for d in direct))
+              sys.exit("PyPI rejects distributions with direct references. This is the guard that "
+                       "keeps a private git URL (see #358) from reaching an upload attempt.")
+          PY
+
+      - name: Guard - this version is not already on PyPI
+        run: |
+          python - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+          v = os.environ["CEV2_VERSION"]
+          try:
+              with urllib.request.urlopen("https://pypi.org/pypi/cell-eval2/json", timeout=30) as r:
+                  have = sorted(json.load(r)["releases"])
+          except urllib.error.HTTPError as e:
+              if e.code != 404:
+                  raise
+              have = []  # project does not exist yet; the first publish creates it
+          print("on PyPI:", have or "(nothing)")
+          if v in have:
+              sys.exit(f"{v} is ALREADY on PyPI. It cannot be replaced, only yanked -- bump the "
+                       "version instead of re-publishing this one.")
+          print(f"{v} is new")
+          PY
+
+      - name: Publish to PyPI
+        # A release always publishes. A manual run publishes only when dry_run is explicitly off,
+        # so the DEFAULT manual invocation exercises every guard and uploads nothing -- which is how
+        # this workflow gets tested before there is a real release to risk.
+        # `inputs.dry_run` (not `github.event.inputs.dry_run`) is the context that yields a real
+        # boolean for a `type: boolean` input; the older path yields the STRING "false", which would
+        # never equal `false`. Either way the mistake fails toward not-publishing, which is why the
+        # default is dry_run: true.
+        if: github.event_name == 'release' || inputs.dry_run == false
+        run: uv publish --trusted-publishing always dist/*
+
+      - name: Dry run - nothing uploaded
+        if: github.event_name != 'release' && inputs.dry_run != false
+        run: echo "Guards passed for $CEV2_VERSION. dry_run was on, so nothing was uploaded."

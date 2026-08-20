@@ -38,5 +38,5 @@ for _ in 1 2 3; do
     pdflatex -interaction=nonstopmode -halt-on-error -output-directory "$AUX" main.tex >/dev/null
 done
 cp -f "$AUX/main.pdf" vcc2026-metrics.pdf
-grep -n 'Overfull\|Underfull' "$AUX/main.log" || true
+grep -n -E 'Overfull|Underfull' "$AUX/main.log" || true
 echo "wrote $(pwd)/vcc2026-metrics.pdf"

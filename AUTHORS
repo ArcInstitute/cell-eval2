@@ -1,0 +1,111 @@
+cell-eval2 — authors and contributors
+=====================================
+
+Issue and pull-request numbers refer to the internal development repository this tree was copied
+from. They are not numbers in this repository; `CHANGELOG.md` uses the same numbering.
+
+
+Maintainer
+----------
+
+Alexander Dobin <alexander.dobin@arcinstitute.org>
+
+
+Code contributed
+----------------
+
+Leon Hafner <leon.hafner@arcinstitute.org>
+    The Spearman–Brown data ceiling — `compute_ceiling`, the split-half reliability estimate
+    that bounds what any submission can score on a finite panel (#151). Documented in §2c of
+    `docs/tutorial.md` and §6b of `docs/metrics.md`. From an idea proposed by Beatrice
+    Bevilacqua (@beabevi).
+
+Jeremy Sullivan <jeremy.sullivan@arcinstitute.org>
+    Found, quantified and fixed the `pds_*` target-gene exclusion, which silently did nothing on
+    guide-level perturbation labels (#248, #250) — the most consequential correctness finding of
+    the 0.9.0 release. Under the defect, a submission that predicted nothing but its own
+    on-target knockdown outscored real ones. See also the two reports below.
+
+Abhinav Adduri (@abhinadduri)
+    `model_direction_match`, the model-conditioned direction metric (#141). Also the GPU fork of
+    `pdex` that the `cell-eval-0.7.6` preset pins in order to reproduce upstream cell-eval.
+
+Chris Carpenter <chris.carpenter@arcinstitute.org>
+    `--write-degenes`, which writes out the real and predicted differential-expression tables
+    the metrics were computed from (#197, re-landed as #292).
+
+
+Reported, diagnosed and proposed
+--------------------------------
+
+Most of these changed shipped code or a documented rule. Where one did not, the entry says
+so.
+
+Jeremy Sullivan (@sullivanj91)
+    #278 — `expr_mse_unbiased_capped_norm` still reads within-group cell dispersion. Ruled
+    docs-only at the time, with the surviving residual recorded as #294 and parked until after
+    the competition. It was re-measured a week later on a live submission as the largest single
+    member contribution in the scored set, and the measured exploit was closed in #348 (PR
+    #353); #294's general class stays open.
+    #279 — `direction_reach_raw`'s no-skill point is a function of the reference's N_conf
+    distribution, not the constant the scale registry assumed, and k* is decided at the head of
+    a ranking the submission controls, which makes it exploitable rather than merely
+    miscalibrated. Measured afterwards on the official validation bundles, a no-skill arm
+    collects `reach_raw` 0.042 / 0.080 / 0.092 on the three contexts — at or above the band the
+    report predicted from synthetic data, and far above the 0.0017–0.011 the code's own comment
+    was justified against. The calibration half
+    became obsolete when the competition score moved to a measured baseline rather than a
+    constant one (#276 part C); the exploit half is open.
+
+Nick Youngblut (@nick-youngblut)
+    #287 — the lognorm scale limit rejected the library's own exact-cap normalization, so a
+    correctly normalized submission was refused at the gate. Fixed in #302.
+
+Kevin Feng (@kfenggg)
+    #289 — `exclude_target_gene`'s partial-resolution tolerance is unsound when the panel is
+    construct-labelled: the resolver cannot separate "gene genuinely absent" from "gene present
+    under another string", and the old report asserted the benign reading. Ruled warn-only, and
+    the honest warning shipped in #302.
+    #291 — `N_conf` is omission-proof but k* is not: it is computed on the pred/real inner
+    join, so a `(target, feature)` row present in the reference and absent from a supplied
+    `--de-pred` table neither advances depth nor counts as a miss, and deleting misses at the
+    head of the ranking is worth a discontinuous jump. Recorded and still open: the
+    straightforward left-join repair measures worse than the defect it fixes, and the bundle
+    manifest schema forbids the obvious alternative.
+
+Joseph Min (@Lioscro)
+    #281 — the `pds_*` rank formula in §3 of `docs/metrics.md` used a bare strictly-closer
+    count where the code uses mid-ranks, so the specification documented a free win on an
+    all-tied row that the code does not actually grant. The formula now carries the mid-rank
+    term.
+
+Justin Guiel (@jguiel)
+    #288 — declaring an identical prediction as lognorm rather than counts moves
+    `expr_mse_unbiased_capped_norm` by more than a point of member score at zero prediction
+    error, because it is the lognorm concavity deficit and not a measure of accuracy. The
+    comparator fallback is no longer silent on a scored member (#302).
+
+@pbunk2555
+    #286 — `de_wilcoxon_lfc_nmae`'s documented 1.0 no-skill anchor was claimed to hold "without
+    any reference to the evaluation data". It does not: DE fold changes average per-cell
+    normalized expression, and under the scored `control_source="real"` leg even a submission
+    broadcasting the exact true control-mean profile is compared against a different quantity,
+    so it lands near 1.0 rather than on it. The anchor is exact for an all-zero predicted
+    log2FC table; ruled docs-only, and the documentation was corrected in #318.
+
+Ivy (Nuo) Liu (@nuoliu)
+    Independently diagnosed, and first characterized to the byte, cupy's 2 GiB pinned
+    host-to-device transfer ceiling in the GPU pseudobulk path (#108).
+
+Beatrice Bevilacqua (@beabevi)
+    Proposed the Spearman–Brown data ceiling that Leon Hafner implemented (#151).
+
+
+AI tooling
+----------
+
+Much of this codebase was written with Claude Code (Anthropic), and OpenAI Codex was used inside
+those same sessions to review the work before it went to human review — a deliberate
+cross-provider check, on the theory that a second model from a second vendor is harder to talk
+into agreement than the one that wrote the code. Design decisions, rulings and
+acceptance of every change are the maintainer's and contributors'.

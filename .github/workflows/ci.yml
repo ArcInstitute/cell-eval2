@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"   # setup-uv creates & activates .venv (VIRTUAL_ENV)
+      # base + dev only. This was once mandatory: `uv sync` resolved `scale`'s private git URL and
+      # failed. That reason is GONE (`scale` is the public `cellstream>=0.9.1`), and `uv sync` does
+      # NOT install extras on its own -- that needs `--extra`/`--all-extras`, and no default-extras
+      # are declared. Kept because it is the minimal, explicit thing: exactly base+dev, no lockfile
+      # written in CI, and the skip counts below stay the documented ones.
+      - run: uv pip install -e . --group dev
+      - run: .venv/bin/ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      # The default shallow checkout is enough: nothing in the suite reads this repository's
+      # history any more. tests/test_expr_mse_unbiased_ratio.py's characterization used to
+      # `git show` 810215c~1 (#257) and needed `fetch-depth: 0`; the two source files it
+      # reconstructs are now vendored under tests/fixtures/pre_247/.
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}   # setup-uv creates & activates .venv
+      - run: uv pip install -e . --group dev
+      # -ra so the log SAYS what it skipped and why. These runners have no CUDA device and no
+      # `scale`/`gpu` extras, so a large slice of the suite never executes here; a bare `-q`
+      # reports that as a single number and a green badge then reads as full coverage
+      # (#183, #224). The CuPy kernels and the real cellstream/gpudge paths are covered out of
+      # band, on a GPU host, before a release tag; deseq2_gpu's jax path is not in that gate.
+      - run: .venv/bin/pytest tests/ -q -ra
+      # ⚠️ GUARDED, see the `run:` block: this unit is Arc-internal and is absent from the
+      # public tree copy, where both steps no-op instead of failing (#335).
+      # tests/gated_modules.toml derives its verdicts from a table of what this environment
+      # provides. Nothing pins that resolution, so check the table against the interpreter that
+      # actually got installed -- otherwise a resolver change (numba leaving scanpy, say) makes
+      # every verdict quietly wrong while the suite stays green. `always()` so a red suite and
+      # a stale table are reported in the same run rather than one hiding the other.
+      - name: Gate manifest environment table is current
+        if: always()
+        run: |
+          # ⚠️ ONE ci.yml SERVES TWO REPOS. The gate-manifest unit (tests/gated_modules.toml,
+          # tools/gate_manifest.py, tests/test_gate_manifest.py) is Arc-internal and does NOT
+          # travel to the public tree copy: it measures the gap between a GitHub CPU runner and
+          # an Arc CUDA node carrying private packages, which no public reader can reproduce.
+          # internal:tools/publish/publish.py clean-replaces rather than edits, so this workflow
+          # ships verbatim -- hence
+          # a guard rather than a deletion. Without it the public tree's CI is red on arrival.
+          # The ruling and the measurement behind it are recorded in the source repository's
+          # publication manifest, which is internal and does not ship here (#335).
+          if [ ! -f tests/gated_modules.toml ]; then
+            echo "no tests/gated_modules.toml here -- the gate manifest does not ship to this tree; nothing to check (no-op, exit 0)"
+            exit 0
+          fi
+          .venv/bin/python tools/gate_manifest.py --validate-env ci
+      # Publish the coverage gap on the run summary page rather than leaving it in the log.
+      # Guarded like the step above, and for the same reason (#335).
+      # tests/test_gate_manifest.py is what keeps this table honest; this step only prints it.
+      - name: What this run did not cover
+        if: always()
+        run: |
+          if [ ! -f tests/gated_modules.toml ]; then
+            echo "no tests/gated_modules.toml here -- the gate manifest does not ship to this tree; nothing to check (no-op, exit 0)"
+            exit 0
+          fi
+          report="$RUNNER_TEMP/gate_report.txt"
+          .venv/bin/python tools/gate_manifest.py --report > "$report" 2>&1 || status=$?
+          cat "$report"
+          {
+            echo '### Gated test modules — what this runner never executed'
+            [ -z "${status:-}" ] || echo "**Report failed (exit $status); raw output below.**"
+            echo '```'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # After the fence is closed, not before: a broken report should be visible AND red.
+          exit "${status:-0}"

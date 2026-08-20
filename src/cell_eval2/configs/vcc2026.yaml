@@ -1,0 +1,60 @@
+# The 2026 competition configuration: v2's conventions, declared in full so that reading this
+# file tells you what the competition scores at. Exactly two fields differ from v2.yaml, and
+# `tests/test_vcc2026_preset.py` fails if a third ever does.
+#
+#   metrics       the vcc2026 profile rather than `full`
+#   cache_strict  LOAD-BEARING, not hygiene: `score.expect_from_run_meta` refuses a
+#                 metadata-only fingerprint, because the anchor gate is the strict CONTENT
+#                 hash. A competition run built without this cannot be scored against a real
+#                 bundle at all, and `prep-real-bundle` cannot cross-check its two legs.
+metrics: vcc2026
+cache_strict: true
+pert_col: target
+control: non-targeting
+version: v2
+control_source: real
+input_type: counts
+max_counts_per_cell: 1000000.0
+target_sum: 1000000.0
+allow_discrete: false
+allow_fractional_counts: false
+autodetect_input_type: false
+validate_input: true
+filter:
+  filter_gene_min_cpm_cell: 5.0
+num_threads: -1
+device: auto
+pert_chunk: 512
+outdir: null
+cache_real: null
+cache_pred: null
+discrimination:
+  distance: cosine
+  rank_denominator: n-1
+  exclude_target_gene: true
+  # #343: every perturbation's target gene leaves the ranked feature space once, so a
+  # submission cannot score by anti-correlating with the OTHER targets' knockdowns
+  exclusion_scope: panel
+  embed_key: null
+  # #282: equidistant competitors share the average of the positions their block spans,
+  # so an all-tied row scores exactly 0.5 rather than the target's alphabetical index
+  tie_policy: midrank
+de:
+  p_adj_threshold: 0.05
+  min_abs_log2fc: 0.0
+  sort_by: abs_log2_fold_change
+  method: wilcoxon
+  nan_lfc_policy: mask
+  backend: auto
+  replicate_col: null
+  mean_calc: arithmetic
+  epsilon: 1.0e-09
+  clip_value: null
+  fdr_scope: per_pert
+  auc_pval_floor: min_nonzero
+  auc_pval_floor_value: 1.0e-10
+gather_threads: -1
+target_gene_map: null
+# The expression comparator's per-GROUP target sum (#264/#268). Declared here rather than
+# inherited from the dataclass default so reading this file tells you what v2 scores at.
+bulk_target_sum: 50000.0

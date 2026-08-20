@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# uv
+.uv/
+
+# Testing / coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data / outputs
+*.h5ad
+# committed tutorial example data (small, tracked on purpose):
+!docs/data/*.h5ad
+*.vcc
+cell-eval-outdir/
+eval_output/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# cell_eval2: local runbook config (copy of internal:tools/env.example.sh) + run artifacts
+tools/env.sh
+*.out
+cell-eval2-outdir/
+.claude/

@@ -1,0 +1,39 @@
+metrics: full
+pert_col: target
+control: non-targeting
+version: v1
+control_source: pred
+input_type: lognorm
+max_counts_per_cell: 1000000000.0
+target_sum: null
+allow_discrete: false
+filter:
+  filter_gene_min_cpm_cell: null
+num_threads: -1
+outdir: null
+discrimination:
+  distance: l1
+  rank_denominator: n
+  # upstream cell-eval's argsort-position tie rule; v1 reproduces it byte-for-byte,
+  # so the #282 mid-rank correction is deliberately NOT applied here
+  tie_policy: position
+  exclude_target_gene: true
+  # v1 reproduces upstream cell-eval, which drops only the PREDICTION row's own target
+  # gene and so leaves each reference perturbation's knockdown visible off-diagonal;
+  # the #343 panel-wide rule is deliberately NOT applied here
+  exclusion_scope: row
+  embed_key: null
+de:
+  p_adj_threshold: 0.05
+  min_abs_log2fc: 0.0
+  sort_by: abs_log2_fold_change
+  method: wilcoxon
+  nan_lfc_policy: keep
+  backend: auto
+  replicate_col: null
+  mean_calc: geometric
+  epsilon: 0.0
+  clip_value: 20.0
+  fdr_scope: global
+  auc_pval_floor: replace_zero
+  auc_pval_floor_value: 1.0e-10
