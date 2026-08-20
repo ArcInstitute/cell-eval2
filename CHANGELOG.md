@@ -7,7 +7,7 @@ All notable changes to cell_eval2. Releases before 0.0.4 (`v0.0.2`, `v0.0.3`) pr
 **The release that can be published.** Nothing here changes a scored number: `rule_version`
 stays 3 and `competition.competition_digest()` is bit-identical to what the three official `-r3`
 bundles stamp (verified, not assumed). What changes is that the distribution is installable by a
-public reader at all — #358 replaced `[scale]`'s private `git+ssh` reference with
+public reader at all — #358 replaced `[scale]`'s private `git+https` reference with
 `cellstream>=0.9.1` and removed `allow-direct-references`, and PyPI rejects any distribution whose
 `requires_dist` carries a direct reference, so every prior version was unpublishable regardless of
 repository visibility.
@@ -60,11 +60,12 @@ without reinstalling stamps artifacts `0.15.0`. See the note in `__init__.py`.
 
 - **BREAKING (packaging): `[scale]` installs the public `cellstream>=0.9.1`, not the private
   `shardad` (#358).** `scale` was a PEP 440 direct reference —
-  `shardad @ git+ssh://git@github.com/ArcInstitute/shardad` — which is why `[tool.hatch.metadata]
-  allow-direct-references` existed, and it is now gone with it. That removal is what makes
-  cell_eval2 **publishable at all**: PyPI rejects a distribution whose `requires_dist` carries a
-  direct reference, extras included, so every version of this package was unpublishable while
-  `scale` named a git URL, independent of repository visibility. `release.yml` guards the class.
+  `shardad @ git+https://github.com/ArcInstitute/shardad.git@v0.7.1` — which is why
+  `[tool.hatch.metadata] allow-direct-references` existed, and it is now gone with it. That removal
+  is what makes cell_eval2 **publishable at all**: PyPI rejects a distribution whose
+  `requires_dist` carries a direct reference, extras included, so every version of this package was
+  unpublishable while `scale` named a git URL, independent of repository visibility. `release.yml`
+  guards the class.
 
   The migration itself is a pure namespace swap — every module path and symbol maps 1:1 onto
   cellstream, verified against the installed wheel — so no scored value, cache key, digest,
