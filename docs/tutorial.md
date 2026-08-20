@@ -18,11 +18,12 @@ internal benchmark runs.
 
 ## 0. Setup & example data
 
-Clone the repo, create a virtualenv, and install the package. **The base install is CPU-only
-and pulls nothing private.** Two things below require more than it: the DE examples explicitly
-select the `pdex` engine, which the base install does not include (`pip install pdex` — see
-§4), and §8's streaming examples need the `scale` extra. Run every command **from the repo
-root** — the tutorial's relative data paths (e.g. `docs/data/…`) assume it.
+**The base install is CPU-only and pulls nothing private.** Two things below require more than
+it: the DE examples explicitly select the `pdex` engine, which the base install does not include
+(`pip install pdex` — see §4), and §8's streaming examples need the `scale` extra.
+
+This tutorial reads data from the repository and refers to `.venv/bin/python` throughout, so
+clone first and create the virtualenv **inside** the clone:
 
 ```bash
 git clone https://github.com/ArcInstitute/cell-eval2.git
@@ -30,10 +31,16 @@ cd cell-eval2
 
 python -m venv .venv && source .venv/bin/activate     # or: uv venv
 
-pip install -e .            # base: CPU, all public dependencies
-pip install -e '.[gpu]'     # + cupy (GPU acceleration)
-pip install -e '.[scale]'   # + cellstream (.shad streaming) — public on PyPI
+pip install cell-eval2              # base: CPU, all public dependencies
+pip install 'cell-eval2[gpu]'       # + cupy (GPU kernels)
+pip install 'cell-eval2[gpudge]'    # + gpudge (GPU differential expression)
+pip install 'cell-eval2[scale]'     # + cellstream (archive reading) — public on PyPI
 ```
+
+Run every command **from the repo root** — the relative paths below (e.g. `docs/data/…`) assume
+it. To work against the checkout instead of the released package, install it editable:
+`pip install -e .`, or with extras `pip install -e '.[gpu]'`. **Quote the brackets** — `zsh`
+(the macOS default) globs `.[gpu]` and fails with `no matches found`.
 
 > The `scale` extra installs [`cellstream`](https://github.com/ArcInstitute/cellstream) from PyPI,
 > so it is an ordinary install for everyone. It is optional only because §8's streaming section is
@@ -247,8 +254,8 @@ print(df_dir.pivot(on="metric", index="perturbation", values="value"))
 `metrics="de"` and `metrics="full"` include all three already. If you have DE tables computed
 elsewhere, pass them as `de_pred=` / `de_real=` (§4) — that skips the backend's *computation*, but
 `de.backend` still decides the metric-family name and the cache provenance, so keep it consistent
-with whatever produced the tables or a DESeq2 table will be reported under `de_wilcoxon_*`. Under
-`EvalConfig(de=DEParams(backend="deseq2"))` they are emitted as `de_deseq2_direction_*`.
+with whatever produced the tables: the configured backend NAMES the metric family, whatever
+actually computed the numbers.
 
 **`direction_precision`** — of the genes the model called significant, the fraction whose log₂FC
 sign the reference agrees with. The reference's *own* significance is deliberately ignored, which
@@ -387,8 +394,9 @@ rank/significance chance-corrected metrics;
 the three #187 direction metrics; the eleven #195 chance-corrected direction metrics;
 `model_direction_match`; the signed LFC-Spearman pair; and `sig_jaccard` — are reported as
 `NaN` rather than given an unvalidated ceiling. `NaN` here means "no defensible ceiling", not
-"zero". Under `de.backend="deseq2"` every DE metric is renamed `de_deseq2_*` and joins that list,
-leaving a ceiling only on `delta_pearson` and the three PDS variants.
+"zero". Ceilings ARE computed for the 18 metrics in `cell_eval2.ceiling.SB_METRICS`: the
+Spearman-Brown-eligible overlap / precision / rank family (14 `de_wilcoxon_*` entries),
+`delta_pearson`, and the three PDS variants.
 
 Four things worth knowing before you quote a ceiling:
 
@@ -494,11 +502,6 @@ print(aggregate_metrics(df_de))
 ```
 
 On this 600-cell subset the CPU DE runs in a few seconds.
-
-**Another backend: `deseq2`.** An opt-in, non-default `deseq2` backend computes DE with a
-pseudobulk **negative-binomial GLM** (via the `deseq2_gpu` engine, an **Arc-internal package**,
-so it is not installable outside Arc) instead of a Wilcoxon rank test. It owns its own
-LFC + p-values and reports them under a dedicated `de_deseq2_*` metric family.
 
 ---
 
@@ -711,7 +714,7 @@ enrolment — most of them are scored.
 
 > ⚠️ This table omits the **eleven chance-corrected direction metrics** (`de_*_direction_fidelity`,
 > `…_coverage`, `…_yield`, `…_reach`, and their `_raw`/`_unbounded` variants) added by issue #195,
-> the `de_deseq2_*` mirrors, and the four unscored expression diagnostics of #257/#264
+> and the four unscored expression diagnostics of #257/#264
 > (`expr_mse_unbiased`, `expr_mse_unbiased_capped`, `expr_distance_unbiased`,
 > `expr_real_mass_ratio`). The complete 48-row catalog with ranges and anchors is
 > [`docs/metrics.md`](metrics.md) §7.
