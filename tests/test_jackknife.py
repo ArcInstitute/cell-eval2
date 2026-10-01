@@ -998,7 +998,7 @@ def test_LONGDOUBLE_is_not_downcast_and_big_endian_float64_is_not_copied():
 
     order, bounds = _group_row_index(np.array(["p", "p"]))[1:]
     # ⚠️ Branch rather than `pytest.skip`. A runtime skip here would be a GATE, and
-    # `internal:tests/gated_modules.toml` would then have to classify "is longdouble wider than float64"
+    # `internal:tests/internal/gated_modules.toml` would then have to classify "is longdouble wider than float64"
     # as an environment condition for every tracked environment -- for a test that in fact has
     # something to assert on BOTH kinds of platform. So assert the guard's verdict either way and
     # the precision claim only where longdouble can carry it.

@@ -117,36 +117,13 @@ def counts_bundle_inputs():
     (baseline 0.65 / 1.0532 / 0.9429 / 0.0 / 0.0638 / 0.0 against replicate 1.0 / 0.0233 /
     0.4395 / 0.8082 / 0.9867 / 0.1948), and `_replicate_entries` returns exactly six entries.
     """
-    # SELF-CONTAINED, not the module-level PERTS. That tuple carries three targeted
-    # perturbations and is shared by every other fixture in this file; five are needed here
-    # (measured: with fewer, too few genes clear `min_gate_size=10` and the anchor raises),
-    # and widening the shared tuple would perturb every existing test for an unrelated reason.
-    perts = ("non-targeting", "GENE1", "GENE2", "GENE3", "GENE4", "GENE5")
-    n_genes, n_cells = 40, 30
-    named = [p for p in perts if p != "non-targeting"]
-    # The #195 trap: each target must BE a measured gene.
-    var = pd.DataFrame(index=named + [f"g{j}" for j in range(n_genes - len(named))])
-    rng = np.random.default_rng(11)
-    effects = {p: rng.integers(0, 8, size=n_genes).astype(np.float32) for p in named}
+    # ONE SOURCE OF TRUTH: the generator lives in `tests/_helpers.py` because
+    # `tests/test_golden_score.py` needs it at MODULE scope and a module-scoped fixture cannot
+    # depend on a function-scoped one. The DOCSTRING stays here -- moving the code must not
+    # move the reasoning. Never `from conftest import`: pytest loads conftest as a PLUGIN.
+    from _helpers import counts_bundle_inputs as _generate
 
-    def _build(seed, eff):
-        r = np.random.default_rng(seed)
-        blocks, labels = [], []
-        for p in perts:
-            X = r.poisson(lam=8.0, size=(n_cells, n_genes)).astype(np.float32)
-            if eff and p in eff:
-                X = X + eff[p]
-            blocks.append(X)
-            labels += [p] * n_cells
-        X = np.vstack(blocks).astype(np.float32)
-        return ad.AnnData(X=X, var=var.copy(),
-                          obs=pd.DataFrame({"target": labels},
-                                           index=[f"c{i}" for i in range(X.shape[0])]))
-
-    real = _build(11, effects)
-    baseline_pred = _build(13, None)          # no skill: the 0 end
-    submission_pred = _build(12, effects)     # a good prediction: something to score
-    return baseline_pred, real, submission_pred
+    return _generate()
 
 
 def _toy_de_adata(n_ctrl_guides=3, n_pert=2, cells_per=5, n_genes=4, seed=0):

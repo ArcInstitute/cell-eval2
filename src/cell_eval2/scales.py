@@ -9,10 +9,13 @@ hands it a constant ``b`` instead of a measured baseline.
 Three properties follow from ``base`` being a constant rather than a measurement, and they
 are the whole reason the registry exists:
 
-* **No artifact.** A scale needs no baseline build, so there is nothing to regenerate when
-  ``cell_eval2_version`` changes -- ``score`` compares that field exactly, which invalidates
-  every measured baseline against artifacts stamped by another release. (A same-generation
-  artifact PAIR is internally consistent, and the version peer alone would still score it. Note
+* **No artifact.** A scale needs no baseline build, so it has no artifact of its own to
+  regenerate -- for a scale specifically, not for the measured baselines beside it.
+  On the LOOSE path ``cli._check_baseline_config`` still compares ``cell_eval2_version``
+  exactly, which invalidates every measured baseline against artifacts stamped by another
+  release -- waivable with ``--allow-config-mismatch``. On the BUNDLE path that comparison is
+  gone as of #381: the version is recorded and not compared, because it was invalidating
+  bundles whose every digest agreed. (Note
   that a COMPETITION bundle has a second, independent gate: `score.py` compares its frozen
   `rule_digest` against the runtime `competition_digest()` and raises, so it does not survive a
   release that moves the competition rule regardless of how its peers pair. A DIAGNOSTIC bundle

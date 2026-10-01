@@ -188,6 +188,7 @@ def iter_cell_groups(store, labels, *, gather_threads: int = -1):
 
 def cell_pseudobulk(store, *, pert_col, norms, target_sum, noise=None, device="cpu",
                     with_median_umi=False, gather_threads: int = -1, with_moments=False,
+                    per_gene_jk=False,
                     bulk_target_sum: float = DEFAULT_BULK_TARGET_SUM):
     """Memory-bounded per-perturbation pseudobulk over a cell archive. Reuses the frozen
     ``streaming_bulk`` accumulators verbatim (per-group means match the materialize path to
@@ -251,11 +252,13 @@ def cell_pseudobulk(store, *, pert_col, norms, target_sum, noise=None, device="c
     if resolve_device(device) == "cuda":
         result = _streaming_pseudobulk_gpu(blocks, perts, P, G, norms, target_sum,
                                            with_moments=with_moments,
+                                           per_gene_jk=per_gene_jk,
                                            bulk_target_sum=bulk_target_sum,
                                            make_blocks=make_blocks)
     else:
         result = _streaming_pseudobulk_cpu(blocks, perts, P, G, norms, target_sum,
                                            with_moments=with_moments,
+                                           per_gene_jk=per_gene_jk,
                                            bulk_target_sum=bulk_target_sum,
                                            make_blocks=make_blocks)
     out, moments = result if with_moments else (result, None)

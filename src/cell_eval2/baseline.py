@@ -8,8 +8,8 @@ reach: the profile is averaged from the evaluated real perturbations, so it is
 transductive and no real submission has access to that data. What it bounds is a
 metric's TRIVIALITY -- a score at or below it is not evidence of target-specific skill.
 Designs of record:
-``internal:docs/superpowers/specs/2026-07-29-generic-response-baseline-design.md`` for the profile
-and ``internal:docs/superpowers/specs/2026-08-05-baseline-dispersed-emission-design.md`` for its
+``internal:docs/internal/superpowers/specs/2026-07-29-generic-response-baseline-design.md`` for the profile
+and ``internal:docs/internal/superpowers/specs/2026-08-05-baseline-dispersed-emission-design.md`` for its
 emission as cells.
 """
 from __future__ import annotations

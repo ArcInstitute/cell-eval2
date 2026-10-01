@@ -189,18 +189,23 @@ real-bundle validation is *peer-to-peer* — `expect_from_run_meta` reads the su
 identity and `validate_anchor` compares the two artifacts with each other, never with current
 semantics — so two artifacts both built before this change agree and pass. Inside the 0.13.0 window
 `cell_eval2_version` separated nothing: both sides stamped `0.13.0`, so #271 joined #172, #320, #321
-and #322 as a value-moving change that a same-version pair cannot see. ⚠️ **0.14.0 closes that
-window going forward** — the stamp moves — and an ENROLLED competition bundle built at 0.13.0 is
-refused either way, on its stale `rule_digest`. What survives below is the loose and diagnostic
-paths. Three
+and #322 as a value-moving change that a same-version pair cannot see.
+⚠️ **A release bump does NOT close that window** (#381): `cell_eval2_version` is recorded and
+not compared on the bundle path, so a same-semantics release neither separates a mixed pair nor
+invalidates a good one. What closes it for an ENROLLED competition bundle is `rule_digest`,
+which carries the hand-bumped `rule_version` and refuses a stale bundle outright. What survives
+below is the loose and diagnostic paths. Three
 consequences worth naming: loose `--baseline-agg` pairing is unguarded even for a mixed pair
 (`baseline.config_digest` carries no metric-semantics term at all — the documented `#314` gap,
 deferred by Alex on 2026-08-17, of which #271 is the **fourth** live instance and the first whose
 moving object is the pseudobulk rather than a metric's definition); an **all-legacy** partial
 directory with no semantics sidecar is accepted with a warning by #246's compatibility ruling; and a
 pre-fix `lfc_nmae_ref` reference computed with the deseq2 backend is accepted (diagnostic
-`from_reference` only — `avg_score` is computed before that column is added). 0.14.0 is that
-release bump: regenerate rather than mix.
+`from_reference` only — `avg_score` is computed before that column is added).
+Bumping `rule_version` is what forces a bundle rebuild; a release on its own does not. (That
+is the BUNDLE path. On the loose `--baseline-agg` path `cell_eval2_version` is still compared,
+so a release still invalidates measured baselines built by another one — waivable with
+`--allow-config-mismatch`.)
 
 ⚠️ **Regenerating "the baseline" is not enough — regenerate BOTH SIDES.** On the `--baseline-agg`
 path the *submission's* own `agg_results.csv` + `run_meta.json` can be the pre-fix artifact; rebuild
@@ -2323,7 +2328,8 @@ anchor claiming `split_half_raw` for an lfc_nmae member is rejected.
 Both doors run the **same** validation: exact dtypes, exactly one row per expected metric (no
 duplicates, no extras, no missing, never empty), a finite `replicate`, the estimator pairing
 above, and agreement on `real_fingerprint` (the **strict content** hash — the metadata hash is
-stamped as provenance and is never the gate), `semantic_identity` and `cell_eval2_version`. The
+stamped as provenance and is never the gate) and `semantic_identity`. The anchor's
+`cell_eval2_version` is recorded in its sidecar and is NOT compared (#381). The
 expectations come from the **user run's** `run_meta.json`, never from the anchor's own sidecar,
 which would validate an artifact against itself. A user run without `--cache-strict` has only a
 metadata fingerprint and is **refused**.
@@ -2407,8 +2413,8 @@ The manifest stamps one of three rule states, decided once at build time:
 - A present but different `rule_digest` means the bundle was built under a competition rule
   that has since moved. `score` refuses it.
 
-`score --real-bundle` compares nine submission peers from the manifest with the submission's
-own `run_meta.json`: `cell_eval2_version`, `config_digest`, `comparator`,
+`score --real-bundle` compares eight submission peers from the manifest with the submission's
+own `run_meta.json`: `config_digest`, `comparator`,
 `source_fingerprint`, `source_fingerprint_strict`, `resolved_device`,
 `resolved_de_backend`, `input_type_real_effective`, and
 `de_real_fingerprint`. Any disagreement is fatal and names every mismatched field; there is no
@@ -2416,7 +2422,12 @@ waiver. `--allow-config-mismatch` alongside `--real-bundle` is a usage error, no
 hatch. `--real-bundle` is mutually exclusive with `--baseline-agg`, `--baseline-meta`,
 `--anchor`, and `--anchor-cache` because the bundle supplies both scale ends.
 
-Two **prediction-side** fields are treated differently from the nine peers, because the
+`cell_eval2_version` is recorded in the manifest and compared nowhere on this path (#381): it
+was invalidating bundles whose every digest agreed — the official `-r3` and `-r4` bundles
+carry identical `rule_digest` and `config_digest` and byte-identical anchor parquets. The
+semantics gate is `rule_digest`, above.
+
+Two **prediction-side** fields are treated differently from the eight peers, because the
 prediction is the one side a baseline/submission pairing is *expected* to differ on. They are
 not handled the same way as each other, and the difference is where each one lives:
 
@@ -2481,7 +2492,7 @@ A **scale** measures against two *constants*, so a value reads without the compa
 Each `--scale` adds one column named for the scale; `from_baseline` and its `avg_score` are
 untouched. `--scale` is repeatable, and `--baseline-agg` becomes optional when one is given —
 a scale carries its own reference points, so it needs no baseline artifact at all, nothing to
-regenerate when `cell_eval2_version` changes, and no way to go degenerate.
+regenerate for the scale itself, and no way to go degenerate.
 
 **`low-random_high-1_v10`** — 0 at the random minimum, 1 at real input (the real count matrix
 pasted as the prediction). Covers the six scored `vcc2026` metrics; the profile's four

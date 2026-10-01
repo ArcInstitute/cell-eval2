@@ -666,6 +666,160 @@ def test_score_cellstream_passes_one_bundle_to_every_piece(monkeypatch):
     assert len(built) == 1, f"_RefBundle must be built ONCE per context, was built {len(built)}x"
 
 
+# --- #387: opt-in DE-table export from the streaming path -------------------------------------
+
+def test_score_cellstream_write_de_requires_outdir():
+    """The one combination that cannot be honoured must fail fast, before any archive I/O:
+    write_de asks for de_real/de_pred to be written, and they have nowhere to land without an
+    outdir. The check precedes every open_cell_store, so no stubbing is needed here."""
+    from cell_eval2.cellstream import score_cellstream
+    from cell_eval2.config import EvalConfig
+    with pytest.raises(ValueError, match=r"write_de=True requires outdir"):
+        score_cellstream("pred.shad", "real.shad",
+                         config=EvalConfig(pert_col="perturbation", control="control"),
+                         mem_budget=_BIG, write_de=True)
+
+
+def test_score_cellstream_write_de_emits_de_tables(tmp_path, monkeypatch):
+    """write_de=True must (a) thread de_out to every score_piece and (b) publish de_real.parquet
+    + de_pred.parquet to outdir -- de_real from the reference builder's real_de.parquet, de_pred
+    concatenated across the per-piece pred DE tables. Same CPU-only stubbing as the wiring tests
+    above (store, partition guard, both core builders, RefBundle, score_piece and the aggregator
+    are stubbed), so neither a GPU nor cellstream is involved; run._write_de_tables is exercised
+    for real, so the emitted schema is the --write-degenes one."""
+    import os
+    import polars as pl
+    import cell_eval2.cellstream as cs
+    import cell_eval2.norm as _norm
+    import cell_eval2.partition as partition
+    import cell_eval2.partition_inmem as pinmem
+    import cell_eval2.h5ad_manifest as h5m
+    from cell_eval2.config import EvalConfig
+
+    def _de_frame(target):
+        return pl.DataFrame({"target": [target], "feature": ["g0"],
+                             "log2_fold_change": [1.5], "p_adj": [0.01]})
+
+    store = _FakeCellStore(n_per=100)
+    monkeypatch.setattr(cs, "open_cell_store", lambda p: store)
+    monkeypatch.setattr(_norm, "resolve_input_type", lambda *a, **k: "counts")
+    monkeypatch.setattr(pinmem, "_require_partition_config", lambda cfg: cfg)
+    monkeypatch.setattr(pinmem, "_build_pred_control_reference_core", lambda *a, **k: None)
+
+    # The reference builder writes the full real DE table into cache_dir (=ref_dir).
+    def _fake_ref(source, *, config, cache_dir, **k):
+        _de_frame("REAL_ALL").write_parquet(os.path.join(cache_dir, "real_de.parquet"))
+    monkeypatch.setattr(pinmem, "_build_reference_streaming_core", _fake_ref)
+    monkeypatch.setattr(pinmem, "_RefBundle", lambda cache_dir, cfg: ("bundle", cache_dir))
+
+    class _TwoBatchSource:
+        def __init__(self, *a, **k):
+            pass
+
+        def iter_pert_batches(self, mem_budget):
+            return iter([(("GENE_A",), object()), (("GENE_B",), object())])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cs, "CellBatchSource", _TwoBatchSource)
+
+    # score_piece writes one pred DE table per piece into de_out, and records what it was handed.
+    de_outs: list[object] = []
+
+    def _fake_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=None,
+                    bundle=None, comparator=None, de_out=None, native_gpu_normalize=False):
+        de_outs.append(de_out)
+        if de_out is not None:
+            _de_frame(f"PRED_{piece_id}").write_parquet(
+                os.path.join(de_out, f"{piece_id}__de_pred.parquet"))
+        return None
+    monkeypatch.setattr(pinmem, "score_piece", _fake_piece)
+
+    monkeypatch.setattr(partition, "aggregate_partials",
+                        lambda *a, **k: (pl.DataFrame({"perturbation": ["GENE_A"]}), None))
+
+    class _FakeResult:
+        per_pert = pl.DataFrame({"perturbation": ["GENE_A"]})
+        per_context = pl.DataFrame({"context": ["all"]})
+        overall = pl.DataFrame({"metric": ["x"]})
+    monkeypatch.setattr(h5m, "_assemble_score_result", lambda frames: _FakeResult())
+
+    outdir = tmp_path / "out"
+    cfg = EvalConfig(pert_col="perturbation", control="control", control_source="real",
+                     metrics=full_minus_moments())
+    cs.score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG,
+                        outdir=str(outdir), write_de=True)
+
+    # Every piece was handed the SAME de_out directory (not None).
+    assert len(de_outs) == 2 and all(d is not None for d in de_outs)
+    assert de_outs[0] is de_outs[1]
+
+    de_real = pl.read_parquet(outdir / "de_real.parquet")
+    de_pred = pl.read_parquet(outdir / "de_pred.parquet")
+    assert de_real["target"].to_list() == ["REAL_ALL"]
+    # de_pred concatenates both pieces, in glob-sorted piece order.
+    assert sorted(de_pred["target"].to_list()) == ["PRED_ctx_0", "PRED_ctx_1"]
+    # The --write-degenes schema (run._write_de_tables validates and derives abs LFC).
+    assert {"target", "feature", "log2_fold_change", "p_adj"} <= set(de_pred.columns)
+
+
+def test_score_cellstream_write_de_false_writes_no_de_tables(tmp_path, monkeypatch):
+    """Off by default: write_de=False (the existing callers' path) passes de_out=None to every
+    piece and emits no de_real/de_pred, only the ScoreResult parquets."""
+    import os
+    import polars as pl
+    import cell_eval2.cellstream as cs
+    import cell_eval2.norm as _norm
+    import cell_eval2.partition as partition
+    import cell_eval2.partition_inmem as pinmem
+    import cell_eval2.h5ad_manifest as h5m
+    from cell_eval2.config import EvalConfig
+
+    store = _FakeCellStore(n_per=100)
+    monkeypatch.setattr(cs, "open_cell_store", lambda p: store)
+    monkeypatch.setattr(_norm, "resolve_input_type", lambda *a, **k: "counts")
+    monkeypatch.setattr(pinmem, "_require_partition_config", lambda cfg: cfg)
+    monkeypatch.setattr(pinmem, "_build_reference_streaming_core", lambda *a, **k: None)
+    monkeypatch.setattr(pinmem, "_build_pred_control_reference_core", lambda *a, **k: None)
+    monkeypatch.setattr(pinmem, "_RefBundle", lambda cache_dir, cfg: ("bundle", cache_dir))
+
+    class _OneBatchSource:
+        def __init__(self, *a, **k):
+            pass
+
+        def iter_pert_batches(self, mem_budget):
+            return iter([(("GENE_A",), object())])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cs, "CellBatchSource", _OneBatchSource)
+
+    de_outs: list[object] = []
+    monkeypatch.setattr(pinmem, "score_piece",
+                        lambda *a, **k: de_outs.append(k.get("de_out")) or None)
+    monkeypatch.setattr(partition, "aggregate_partials",
+                        lambda *a, **k: (pl.DataFrame({"perturbation": ["GENE_A"]}), None))
+
+    class _FakeResult:
+        per_pert = pl.DataFrame({"perturbation": ["GENE_A"]})
+        per_context = pl.DataFrame({"context": ["all"]})
+        overall = pl.DataFrame({"metric": ["x"]})
+    monkeypatch.setattr(h5m, "_assemble_score_result", lambda frames: _FakeResult())
+
+    outdir = tmp_path / "out"
+    cfg = EvalConfig(pert_col="perturbation", control="control", control_source="real",
+                     metrics=full_minus_moments())
+    cs.score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG,
+                        outdir=str(outdir))
+
+    assert de_outs == [None]
+    assert not os.path.exists(outdir / "de_real.parquet")
+    assert not os.path.exists(outdir / "de_pred.parquet")
+    assert os.path.exists(outdir / "per_pert.parquet")   # the unchanged ScoreResult output
+
+
 # --- #179: the public entry point a downstream caller needed ---------------------------------
 
 def test_cell_archive_input_type_is_public_and_takes_a_PATH(tmp_path):

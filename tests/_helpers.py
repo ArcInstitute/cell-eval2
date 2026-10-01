@@ -85,3 +85,44 @@ def full_minus_moments() -> list[str]:
     from cell_eval2.catalog import PROFILES, needs_moments_transitively
 
     return [m for m in PROFILES["full"] if not needs_moments_transitively(m)]
+
+
+def counts_bundle_inputs():
+    """`(baseline_pred, real, submission_pred)`: integer counts defining a USABLE baseline ->
+    replicate scale for all six `vcc2026` members.
+
+    Lives here rather than only in `conftest.py` because `tests/test_golden_score.py` needs it at
+    MODULE scope and a module-scoped fixture cannot depend on a function-scoped one. Every
+    property of these inputs is load-bearing; see `conftest.counts_bundle_inputs`' docstring,
+    which is the record of why (per-target distinct effects, a no-skill baseline arm, and targets
+    present in `var_names`).
+    """
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+
+    perts = ("non-targeting", "GENE1", "GENE2", "GENE3", "GENE4", "GENE5")
+    n_genes, n_cells = 40, 30
+    named = [p for p in perts if p != "non-targeting"]
+    var = pd.DataFrame(index=named + [f"g{j}" for j in range(n_genes - len(named))])
+    rng = np.random.default_rng(11)
+    effects = {p: rng.integers(0, 8, size=n_genes).astype(np.float32) for p in named}
+
+    def _build(seed, eff):
+        r = np.random.default_rng(seed)
+        blocks, labels = [], []
+        for p in perts:
+            X = r.poisson(lam=8.0, size=(n_cells, n_genes)).astype(np.float32)
+            if eff and p in eff:
+                X = X + eff[p]
+            blocks.append(X)
+            labels += [p] * n_cells
+        X = np.vstack(blocks).astype(np.float32)
+        return ad.AnnData(X=X, var=var.copy(),
+                          obs=pd.DataFrame({"target": labels},
+                                           index=[f"c{i}" for i in range(X.shape[0])]))
+
+    real = _build(11, effects)
+    baseline_pred = _build(13, None)          # no skill: the 0 end
+    submission_pred = _build(12, effects)     # a good prediction: something to score
+    return baseline_pred, real, submission_pred

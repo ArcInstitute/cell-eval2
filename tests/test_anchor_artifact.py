@@ -316,3 +316,111 @@ def test_read_anchor_rejects_a_directory_with_no_sidecar(synthetic_pair_with_eff
     os.remove(f"{outdir}/anchor_meta.json")
     with pytest.raises(ValueError, match="anchor_meta.json"):
         read_anchor(outdir)
+
+
+def test_a_sidecar_whose_version_is_not_a_STAMP_is_refused(synthetic_pair_with_effect,
+                                                           tmp_path):
+    """#381 stopped COMPARING `cell_eval2_version` in `validate_anchor`, and that comparison
+    was what used to reject a malformed one -- `_REQUIRED_META` is key-only, so a sidecar
+    carrying `null` would otherwise validate (Copilot, PR #382).
+
+    ONE collected id, looping inside: build the anchor ONCE and re-doctor its sidecar per
+    value. Survivors are collected so the assertion NAMES the value that got in, which a
+    parametrized `pytest.raises` would not on a DID-NOT-RAISE."""
+    from cell_eval2.anchor import read_anchor
+
+    _pred, real = synthetic_pair_with_effect
+    outdir = build_anchor_dir(real, tmp_path)
+    path = f"{outdir}/anchor_meta.json"
+    good = json.loads(open(path).read())
+    accepted = []
+    for bad in (None, "", "   ", 123):
+        open(path, "w").write(json.dumps({**good, "cell_eval2_version": bad}))
+        try:
+            read_anchor(outdir)
+        except ValueError as e:
+            if "not a version string" not in str(e):
+                accepted.append((bad, f"wrong error: {str(e)[:60]}"))
+        else:
+            accepted.append((bad, "ACCEPTED"))
+    assert not accepted, accepted
+
+
+def test_the_CACHE_door_MISSES_on_the_same_malformed_version(synthetic_pair_with_effect,
+                                                             tmp_path, monkeypatch):
+    """The asymmetry, pinned. `_REQUIRED_META` is enforced at TWO doors that want OPPOSITE
+    outcomes on the same value: `read_anchor` RAISES (the caller handed us a bad file) and
+    `_bundle_from_obj` raises `_BadBundle`, which `cached_anchor` turns into a MISS and a
+    recompute (a damaged cache must never abort a scoring run -- `_bundle_from_obj`'s own
+    docstring). Without this test a later 'tidy-up' unifying the two doors would pass every
+    other test in the suite (Copilot, PR #382).
+
+    ⚠️ Every representative in the shared malformed-value matrix, in ONE collected id -- the
+    same shape as the raising doors,
+    and for the same reason. MEASURED (codex checkpoint 2): with only `None` doctored, narrowing
+    `_bundle_from_obj` to `meta["cell_eval2_version"] is None` leaves this test and the whole
+    suite GREEN while `""` and `123` are accepted and reused from cache.
+
+    Asserts the whole remedy per value the way `test_a_bundle_with_a_NON_DICT_meta_MISSES_...`
+    does: count the compute closure, check the recomputed meta carries a real stamp, and prove
+    the bad entry was REPLACED (the following call is warm). Survivors are collected so the
+    assertion NAMES the value that got in."""
+    import glob
+    import os
+
+    import cell_eval2.anchor as anchor_mod
+    from cell_eval2.cache import CacheStore
+    from cell_eval2.run import _resolve_config
+
+    _pred, real = synthetic_pair_with_effect
+    cfg = _resolve_config(EvalConfig(**PROFILE_KW), {})
+    store = CacheStore(str(tmp_path / "cache"))
+    anchor_mod.cached_anchor(real, cfg, store=store, base_seed=0, n_splits=2)
+
+    def artifact():
+        found = [p for p in glob.glob(str(tmp_path / "cache" / "*.json"))
+                 if os.path.basename(p) != "manifest.json"]
+        assert len(found) == 1, f"expected ONE cache artifact, got {found}"
+        return found[0]
+
+    calls = {"n": 0}
+    inner = anchor_mod.compute_replicate_anchor
+
+    def counted(*a, **k):
+        calls["n"] += 1
+        return inner(*a, **k)
+
+    monkeypatch.setattr(anchor_mod, "compute_replicate_anchor", counted)
+
+    # ⚠️ Doctor from a captured KNOWN-GOOD baseline, never from whatever is on disk. If a value
+    # is wrongly ACCEPTED the door writes nothing back, so the next iteration would re-read the
+    # PREVIOUS bad value -- and the producer-stamped-a-version guard would then fire on that
+    # leftover, reporting a fixture problem instead of the door that let the value through.
+    good = json.loads(open(artifact()).read())
+    assert good["meta"]["cell_eval2_version"], "the fixture never wrote a version to doctor"
+
+    missed = []
+    for bad in (None, "", "   ", 123):
+        open(artifact(), "w").write(json.dumps(
+            {**good, "meta": {**good["meta"], "cell_eval2_version": bad}}))
+
+        before = calls["n"]
+        try:
+            frame, _splits, meta = anchor_mod.cached_anchor(real, cfg, store=store,
+                                                           base_seed=0, n_splits=2)
+        except Exception as exc:                                # noqa: BLE001 -- any raise fails
+            missed.append((bad, f"RAISED {type(exc).__name__}: {str(exc)[:60]}"))
+            continue
+        if calls["n"] != before + 1:
+            missed.append((bad, "ACCEPTED -- the door did not miss"))
+            continue
+        if not (isinstance(meta["cell_eval2_version"], str) and meta["cell_eval2_version"]):
+            missed.append((bad, f"recomputed meta still bad: {meta['cell_eval2_version']!r}"))
+            continue
+        if frame.height == 0:
+            missed.append((bad, "recomputed frame is empty"))
+            continue
+        anchor_mod.cached_anchor(real, cfg, store=store, base_seed=0, n_splits=2)
+        if calls["n"] != before + 1:
+            missed.append((bad, "the recomputed bundle was not written back over the bad entry"))
+    assert not missed, missed

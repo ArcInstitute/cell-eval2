@@ -42,15 +42,16 @@ BASELINE_AGG = "baseline_agg.csv"
 BASELINE_META = "baseline_meta.json"
 CONFIG_YAML = "config.yaml"
 
-#: Copied verbatim from the baseline leg's `run_meta` -- exactly `_check_baseline_config`'s
-#: comparison set. Both PRED-side fields are deliberately absent: the prediction side is
+#: Copied verbatim from the baseline leg's `run_meta` -- `_check_baseline_config`'s comparison
+#: set MINUS `cell_eval2_version`, which is recorded and not compared (#381).
+#: Both PRED-side fields are deliberately absent: the prediction side is
 #: EXPECTED to differ between the baseline arm and a submission, so comparing it would reject
 #: precisely the pairings the check exists to permit. `de_pred_fingerprint` is nonetheless
 #: CHECKED, one-sidedly and against a constant rather than against a peer -- see
 #: `check_submission` (#291). `input_type_pred_effective` (#192) is recorded in the manifest
 #: and not compared at all; see `MANIFEST_RECORDED_ONLY`.
 SUBMISSION_PEERS = (
-    "cell_eval2_version", "config_digest", "comparator", "source_fingerprint",
+    "config_digest", "comparator", "source_fingerprint",
     "source_fingerprint_strict", "resolved_device", "resolved_de_backend",
     "input_type_real_effective", "de_real_fingerprint",
 )
@@ -68,7 +69,17 @@ SUBMISSION_PEERS = (
 #: unblocks is a DIAGNOSTIC bundle built with `autodetect_input_type=True` or `version="v1"`,
 #: where the pred side is re-typed per matrix and a log-normalized submission was refused
 #: outright -- with no `--allow-config-mismatch` waiver available on the bundle path at all.
-MANIFEST_RECORDED_ONLY = ("input_type_pred_effective",)
+#:
+#: `cell_eval2_version` joined this tuple in #381, moving OFF the peer comparison. It was the
+#: only thing standing between the `-r3` and `-r4` official bundles, whose `rule_digest` and
+#: `config_digest` are identical and whose anchor parquets are byte-identical -- so a release
+#: that moves no digest was invalidating every distributed bundle, with no waiver available
+#: (`--allow-config-mismatch` is a usage error alongside `--real-bundle`). The semantics gate it
+#: was standing in for is `rule_digest`, which carries the hand-bumped `rule_version` and is
+#: compared with no waiver by `score_metrics`. ⚠️ MOVED between the tuples, never added to
+#: either: `read_real_bundle` requires every name in the union to be PRESENT, so the union is
+#: unchanged and every frozen official bundle stays readable (#291 is what an addition costs).
+MANIFEST_RECORDED_ONLY = ("input_type_pred_effective", "cell_eval2_version")
 
 
 @dataclass(frozen=True)
@@ -100,7 +111,8 @@ def check_submission(manifest: dict, user_meta: dict, *,
     `--allow-config-mismatch` is a USAGE ERROR alongside a bundle rather than a waiver, so a
     harness cannot land in diagnostic mode by habit.
 
-    The fields are exactly `_check_baseline_config`'s, each already justified in place. The
+    The fields are `_check_baseline_config`'s MINUS `cell_eval2_version`, each already justified
+    in place; the version is recorded in the manifest and compared nowhere here (#381). The
     manifest supplies the peer values that used to come from `baseline_meta.json`.
 
     Plus ONE non-peer check (#291): the prediction side's DE table must have been COMPUTED
@@ -149,8 +161,10 @@ def check_submission(manifest: dict, user_meta: dict, *,
     #      so the gate would not tighten enrolment, it would end it.
     #
     # FAIL-CLOSED on absence, like the loop above: `build_run_meta` has stamped this field
-    # unconditionally since the field existed, and `cell_eval2_version` is a peer, so any
-    # submission that can legitimately reach this line carries it.
+    # unconditionally since the field existed, and `config_digest` is a peer stamped by the same
+    # function, so any submission that can legitimately reach this line carries it. (It used to
+    # cite `cell_eval2_version`; #381 made that recorded-only, so the argument now rests on
+    # `config_digest`.)
     #
     # ⚠️ The opt-in is scoped to a SUPPLIED table, never to a MISSING key. `--de-pred` is
     # also the isolator the metric campaigns are built on (#238/#259/#279 and #291 itself),
@@ -508,7 +522,7 @@ def read_real_bundle(root) -> RealBundle:
     # anchor-identity group would otherwise pass every check in the gate.
     required = (
         "manifest_version", "real_bundle_id", "created_utc",              # header
-        *SUBMISSION_PEERS, *MANIFEST_RECORDED_ONLY,                        # submission peers
+        *SUBMISSION_PEERS, *MANIFEST_RECORDED_ONLY,                  # recorded manifest fields
         "real_fingerprint", "anchor_semantic_identity", "anchor_config_hash",
         "anchor_metric_names", "anchor_digest", "base_seed", "n_splits", "seed_derivation",
         "derived_seeds", "bulk_target_sum", "control_source_effective", "estimators",
@@ -518,6 +532,16 @@ def read_real_bundle(root) -> RealBundle:
         raise ValueError(
             f"{path} is missing {missing}; it cannot certify a submission. Rebuild the bundle "
             "with `cell-eval2 prep-real-bundle`."
+        )
+    # PRESENCE means a REAL STAMP on this side too. #381 stopped comparing the field, and the
+    # comparison was what used to reject a null: a manifest and a run_meta could not BOTH be
+    # malformed and still agree. Verified against all 13 official bundles, which are unaffected.
+    version = manifest["cell_eval2_version"]      # present: the `missing` check is just above
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(
+            f"{path} records cell_eval2_version={version!r}, which is not a version string. The "
+            "field is recorded rather than compared as of #381, but a bundle still has to say "
+            "which release built it."
         )
     if manifest["manifest_version"] != MANIFEST_VERSION:
         raise ValueError(

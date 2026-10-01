@@ -743,8 +743,12 @@ def main(argv: list[str] | None = None) -> None:
                 # nothing is the failure cli.py:643 already argues against.
                 raise SystemExit(
                     "--allow-config-mismatch does not apply to --real-bundle: a submission "
-                    "that does not match its bundle is refused, with no waiver. Score against "
-                    "--baseline-agg/--anchor for a diagnostic number instead.")
+                    "that does not match its bundle on any COMPARED field is refused, with no "
+                    "waiver. (`cell_eval2_version` is recorded and NOT compared as of #381.) "
+                    "Score against --baseline-agg/--anchor for a diagnostic number instead. "
+                    "If instead you supplied a pred-side DE table (--de-pred), the route is "
+                    "--diagnostic-supplied-de-pred on THIS bundle -- that one keeps the bundle "
+                    "and takes the diagnostic downgrade.")
             user_meta_path = _find_meta(args.user_meta, args.user_agg, "run_meta.json")
             if user_meta_path is None:
                 raise SystemExit(

@@ -2,6 +2,107 @@
 
 All notable changes to cell_eval2. Releases before 0.0.4 (`v0.0.2`, `v0.0.3`) predate this file.
 
+## [Unreleased]
+
+## [0.18.0] — 2026-10-01
+
+### Added
+
+- **`score_cellstream(..., write_de=True)` re-emits the raw gene-level DE tables (#387).** The
+  streaming scorer computes both DE tables but, since the `write_de` parameter was dropped in
+  0.16.0, had no way to surface them — they were discarded with its temp directories. `write_de`
+  (off by default, requires `outdir`) now also writes `de_real.parquet` + `de_pred.parquet`
+  through the same `run._write_de_tables` writer the in-memory `--write-degenes` path uses, so the
+  two paths emit a byte-identical schema. `de_real` is the reference builder's full real DE table;
+  `de_pred` concatenates the per-piece pred DE tables via a new opt-in `de_out` argument on
+  `partition_inmem.score_piece`. This unblocks arcbench-nf's gene-level DE ingest from the
+  streaming path.
+
+- **The jackknife's per-gene decomposition, opt-in, on every reader that can build it.**
+  `moments.jackknife_per_gene` returns the `[P, G]` terms whose sum is `jackknife_correction`'s
+  scalar `C_p`, `GroupMoments` carries them as an optional `jk_gene`, and
+  `jackknife_correction(gene_mask=…)` charges the correction over a gene SUBSET.
+  `moments.signal_fraction_mask` turns them into the per-gene signal fraction
+  `s_pg = (EF_pg − q_pg − q_ctrl,g)/EF_pg`, and `moments.correction_per_gene_for` aligns the terms
+  to a caller's row order the way `correction_for` aligns the scalar.
+
+  **Nothing in `src` asks for them and no scored number moves.** The pass is gated behind
+  `per_gene_jk=False` on `prep.pseudobulk_bulk_lognorm_with_moments`,
+  `streaming_bulk.inmem_pseudobulk` / `_streaming_pseudobulk_cpu` / `_streaming_jackknife`,
+  `gpu.bulk.GroupedMeanAccumulator.jackknife` and `cell_source`, because it is O(P·G) resident —
+  44 MB at 300 × 18,533, 3 GB at 20,000 perturbations. `rule_version` stays 3 and
+  `competition_digest()` is unchanged.
+
+  The scalar is *bit-identical* whichever route built it: the per-gene kernel returns the scalar
+  computed by the scalar kernel's own expression rather than summing its own scaled terms, so
+  switching the pass on cannot move an already-published `expr_mse_unbiased`. Cross-kernel parity
+  is pinned per gene (resident vs streaming, chunk 7 and 512), and `cache._dump_npz_moments`
+  round-trips `jk_gene` as an OPTIONAL npz key so an artifact written without it stays readable.
+
+  The PARTITIONED reader cannot supply the terms — its `_side_bulks` calls request no moments at
+  all — and `correction_per_gene_for` says so in its error rather than degrading.
+
+  Extracted from the local `fix/expr-mse-signal-fraction-floor` branch, which pairs these
+  primitives with a scoring policy that changes `rule_version`. Only the primitives are here.
+
+  **Two requests that used to be silent are now errors** (codex review, 2026-08-22).
+  `per_gene_jk=True` with `with_moments=False`, or with no `bulk_lognorm` in `norms`, returned
+  `jk_gene=None` and no complaint — indistinguishable from asking for the terms and having them
+  come out empty, with the failure surfacing much later as a `None` reaching
+  `signal_fraction_mask`. Both now raise, on every public reader (`streaming_pseudobulk` and the
+  two stream kernels through one shared check, `inmem_pseudobulk` through its own — it drives the
+  accumulator directly rather than routing through them). And `signal_fraction_mask` now enforces
+  the `[P, G]` contract it documents: matching 3-D inputs used to return a 3-D mask, matching 1-D
+  inputs failed inside the indexing naming neither argument, and a float `control_row` passed the
+  range check before failing the same way.
+
+  ⚠️ **The cache key does not discriminate on `per_gene_jk`** — a warm artifact written with the
+  pass off is a HIT for a caller that wants the terms, which then gets `jk_gene=None`. Unreachable
+  from any scored path today (nothing in `src` requests the terms) and it fails loudly rather than
+  serving wrong numbers, but the flag has to enter the cached params before any scoring consumer
+  lands. Recorded at the `jk_gene` dump site in `cache.py`.
+
+### Changed
+
+- **A release no longer invalidates a scoring bundle (#381).** `cell_eval2_version` moved from
+  `real_bundle.SUBMISSION_PEERS` to `MANIFEST_RECORDED_ONLY`, and its COMPARISON is gone from
+  `anchor.validate_anchor`, so it is recorded in every artifact and compared nowhere on the bundle
+  path. It is still VALIDATED: a missing, empty or non-string stamp fails closed at every read
+  boundary — what went is the equality check, not the contract.
+  MEASURED: the official `-r3` (0.15.0) and `-r4` (0.16.0) bundles carry identical `rule_digest`
+  and `config_digest` and byte-identical anchor parquets, differing in one `de_wilcoxon_lfc_nmae`
+  cell at 1 ULP — so the `-r4` rebuild moved no COMPARED digest and no scored number materially
+  (`anchor_digest` did move, because it deliberately hashes the version in, and nothing compares
+  it), while the
+  version string was refusing every distributed bundle with no waiver available. (That 1 ULP does
+  sit in `baseline_agg.csv`, so it is observable rather than invisible; it is immaterial, not
+  absent, and it is the same member `tests/test_golden_score.py` gives a 4-ULP budget for the
+  same reason.) The semantics gate is
+  unchanged: `rule_digest` carries the hand-bumped `rule_version` and `score_metrics` still
+  refuses a stale one outright. `-r3` becomes scoreable again; `-r2` stays refused on its rule.
+  `AnchorExpect` loses its `version` field (BREAKING for direct callers).
+  The loose `--baseline-agg` path is untouched and still compares the version, waivably.
+- **A golden end-to-end scoring pin (#381, part of #338's ask).** `tests/test_golden_score.py`
+  scores the committed synthetic fixture through the real bundle path and pins every member's
+  `from_baseline` and `from_replicate`. Five members are compared bit-exactly;
+  `de_wilcoxon_lfc_nmae` and the derived `avg_score` carry a 4-ULP tolerance, because that
+  member is nondeterministic run-to-run at 1 ULP through a threaded floating-point reduction
+  (measured over 12 runs across four threading configurations and both CI dependency stacks).
+
+### Fixed
+
+- **`control_source="real"` on a CPU DE backend refuses a duplicated gene axis with a `ValueError`
+  regardless of the anndata version.** `run._pred_de_input` used to rely on `anndata.concat`'s
+  reindex to reject duplicated `var_names`. Under anndata 0.13.2 that raised
+  `ValueError("cannot reindex on an axis with duplicate labels")`; under anndata 0.13.3 it raises
+  `pandas.errors.InvalidIndexError` (a plain `Exception`), so the error type -- and
+  `tests/test_de_duplicate_keys_218.py`'s pin on this route -- changed with the resolver. The guard
+  now runs before the concat, names the duplicated labels, and points at #218. Surfaced by CI's
+  python 3.12 job resolving anndata 0.13.3.post0. The trigger is the anndata release, not pandas 3:
+  measured, the pin passes under anndata 0.13.2 and fails under 0.13.3.post0 with pandas 3.0.5 both
+  times, and the python 3.11 job (anndata 0.12.19, pandas 2.3.3) was unaffected.
+
+
 ## [0.16.0] — 2026-08-19
 
 **The release that can be published.** Nothing here changes a scored number: `rule_version`

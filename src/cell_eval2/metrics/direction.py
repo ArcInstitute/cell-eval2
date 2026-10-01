@@ -915,7 +915,7 @@ def de_direction_reach(
     BELOW the old threshold on every line, so a real experimental replicate failed it.
 
     Three consequences of the old value, all measured
-    (internal:docs/validation/2026-08-17-direction-reach-purity-threshold.md):
+    (internal:docs/internal/validation/2026-08-17-direction-reach-purity-threshold.md):
 
     * The first depth tolerating one sign error is ``ceil(1/(1-P0))`` = 40 at 0.975 and 10 at
       0.9, so 46-61% of the 300-target val cohort had NO depth at which a single error was

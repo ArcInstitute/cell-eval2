@@ -278,7 +278,6 @@ def _expect_for(meta):
 
     return AnchorExpect(fingerprint=meta["real_fingerprint"],
                         semantic_identity=meta["semantic_identity"],
-                        version=meta["cell_eval2_version"],
                         metrics=tuple(meta["metric_names"]))
 
 
@@ -332,7 +331,6 @@ def test_expect_from_run_meta_builds_a_complete_AnchorExpect():
     exp = expect_from_run_meta(dict(GOOD_RUN_META))
     assert exp.fingerprint == "fp-strict"
     assert exp.semantic_identity == "sem"
-    assert exp.version == "9.9.9"
     assert exp.metrics == ("expr_mae",)
 
 
@@ -347,6 +345,32 @@ def test_a_METADATA_ONLY_user_run_cannot_score_against_an_anchor():
                 source_fingerprint="fp-meta")
     with pytest.raises(ValueError, match="cache-strict|cache_strict"):
         expect_from_run_meta(meta)
+
+
+def test_a_version_that_is_not_a_real_STAMP_is_refused():
+    """#381 demoted the version from a COMPARISON, not from the contract -- and the comparison
+    is what used to reject these. Measured before the change: the peer loop refused
+    `cell_eval2_version=None` as `bundle='0.16.0' submission=None`. A key-only presence check
+    lets None, "" and 123 all cross both bundle gates (Copilot, PR #382).
+
+    ONE collected id, looping INSIDE (Alex's scope call, 2026-08-24): coverage is unchanged --
+    a narrower implementation (`is None`, or a bare falsiness test that lets `123` through)
+    still fails -- and collecting the survivors makes the assertion NAME the value that got in,
+    which a parametrized `pytest.raises` would not on a DID-NOT-RAISE. Matched on
+    "not a version string" and never on the repr of the value: `f"{x!r}"` on a NumPy scalar
+    renders `np.float64(0.0)`, so a substring assertion on the value is brittle for no gain."""
+    from cell_eval2.score import expect_from_run_meta
+
+    accepted = []
+    for bad in (None, "", "   ", 123):
+        try:
+            expect_from_run_meta({**GOOD_RUN_META, "cell_eval2_version": bad})
+        except ValueError as e:
+            if "not a version string" not in str(e):
+                accepted.append((bad, f"wrong error: {str(e)[:60]}"))
+        else:
+            accepted.append((bad, "ACCEPTED"))
+    assert not accepted, accepted
 
 
 @pytest.mark.parametrize("missing", list(GOOD_RUN_META))

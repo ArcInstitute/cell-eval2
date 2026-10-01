@@ -77,14 +77,14 @@ def test_a_competition_bundle_carries_every_file_and_a_rule_digest(
     assert man["manifest_version"] == 1
 
 
-def test_the_manifest_carries_the_submission_peers_verbatim(
+def test_the_manifest_carries_the_run_meta_fields_verbatim(
         counts_bundle_inputs, tmp_path):
-    """Every peer is COPIED from the baseline leg's run_meta, never recomputed -- a second
-    computation is a second thing that can disagree.
+    """Every one of these fields is COPIED from the baseline leg's run_meta, never recomputed --
+    a second computation is a second thing that can disagree.
 
-    `input_type_pred_effective` is in this list although #192 removed it from the COMPARISON:
-    it is still recorded, and a bundle whose provenance is poorer than the frozen ones' is
-    the thing that change must not become."""
+    `input_type_pred_effective` is in this list although #192 removed it from the COMPARISON,
+    and `cell_eval2_version` joined it there in #381: both are still RECORDED, and a bundle
+    whose provenance is poorer than the frozen ones' is the thing that change must not become."""
     baseline_pred, real, _sub = counts_bundle_inputs
     man = _build(tmp_path, real, baseline_pred)
     meta = json.loads((tmp_path / "b" / BASELINE_META).read_text())
@@ -438,8 +438,38 @@ def test_a_directory_without_a_manifest_is_refused(tmp_path):
         read_real_bundle(str(tmp_path / "empty"))
 
 
+def test_a_manifest_whose_version_is_not_a_STAMP_is_refused(counts_bundle_inputs, tmp_path):
+    """The mirror of the run_meta case in Task 2: #381 removed the comparison that used to
+    reject these, and a key-only presence check accepts every representative in the
+    shared malformed-value matrix (Copilot, PR #382).
+
+    ONE id, looping inside -- see the note under Task 2's equivalent. Build the bundle ONCE and
+    re-doctor the manifest per value; rebuilding per value would triple the slowest fixture in
+    the file for no additional coverage."""
+    baseline_pred, real, _sub = counts_bundle_inputs
+    _build(tmp_path, real, baseline_pred)
+    path = tmp_path / "b" / MANIFEST
+    good = json.loads(path.read_text())
+    accepted = []
+    for bad in (None, "", "   ", 123):
+        path.write_text(json.dumps({**good, "cell_eval2_version": bad}))
+        try:
+            read_real_bundle(str(tmp_path / "b"))
+        except ValueError as e:
+            if "not a version string" not in str(e):
+                accepted.append((bad, f"wrong error: {str(e)[:60]}"))
+        else:
+            accepted.append((bad, "ACCEPTED"))
+    assert not accepted, accepted
+
+
+# ⚠️ `cell_eval2_version` is in this list on purpose: "the union is unchanged, so every frozen
+# bundle stays readable" is the whole compatibility case for #381, and nothing else pins it.
+# It passes BEFORE the move (the field was a peer) and AFTER it (the field is recorded-only),
+# because the required union carries it either way -- which is exactly the invariant pinned.
 @pytest.mark.parametrize("drop", ["real_fingerprint", "anchor_digest", "estimators",
-                                  "members", "profile", "created_utc", "rule_mismatches"])
+                                  "members", "profile", "created_utc", "rule_mismatches",
+                                  "cell_eval2_version"])
 def test_a_manifest_missing_ANY_group_is_refused(counts_bundle_inputs, tmp_path,
                                                  drop):
     """Shape validation has to be exhaustive because every consumer reads the manifest with

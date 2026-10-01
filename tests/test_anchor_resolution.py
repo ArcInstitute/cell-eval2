@@ -37,7 +37,6 @@ def _expect(outdir, **override):
     frame, _splits, meta = read_anchor(outdir)
     exp = AnchorExpect(fingerprint=meta["real_fingerprint"],
                        semantic_identity=meta["semantic_identity"],
-                       version=meta["cell_eval2_version"],
                        metrics=tuple(meta["metric_names"]))
     return frame, (_replace(exp, **override) if override else exp)
 
@@ -85,11 +84,111 @@ def test_validate_anchor_refuses_a_shared_control_anchor(synthetic_pair_with_eff
                         source="supplied")
 
 
+def test_validate_anchor_ignores_the_cell_eval2_version(synthetic_pair_with_effect, tmp_path):
+    """#381. The anchor gate was the SECOND fatal version comparison -- fixing only
+    `check_submission` would have left a bundle just as stranded, because `score_metrics` builds
+    `anchor_expect` from the submission's own run_meta unconditionally on the bundle path.
+
+    The identity that matters is `real_fingerprint` + `semantic_identity`, both still compared
+    above. Measured: the `-r3` and `-r4` anchor parquets are byte-identical and their sidecars
+    differ in `cell_eval2_version` alone.
+    """
+    from cell_eval2.anchor import read_anchor, validate_anchor
+
+    _pred, real = synthetic_pair_with_effect
+    outdir = build_anchor_dir(real, tmp_path / "a")
+    frame, expect = _expect(outdir)
+    _f, _s, meta = read_anchor(outdir)
+    validate_anchor(frame, {**meta, "cell_eval2_version": "99.99.99"}, expect,
+                    source="supplied")
+
+
+def test_an_IN_MEMORY_bundle_still_needs_a_real_version_STAMP(synthetic_pair_with_effect,
+                                                              tmp_path):
+    """#381's FIFTH read boundary, and the one the plan's four-row table missed (Copilot,
+    PR #382). `_as_bundle`'s tuple branch returns `(frame, meta)` WITHOUT going through
+    `read_anchor` or `_bundle_from_obj`, so an in-memory 3-tuple reaches `validate_anchor`
+    having passed no reader's value check. The removed version COMPARISON was the only thing
+    validating it on that route.
+
+    MEASURED before the fix: `None`, `""` and `123` were all ACCEPTED, on BOTH doors, and
+    `resolve_anchor` returned a source label as if the anchor were sound.
+
+    A RAISE is right here for both doors: `resolve_anchor` never recomputes at score time, so
+    there is no miss to fall back to -- the cache door's MISS happens upstream in
+    `cached_anchor`, which never reaches this line with a bad value."""
+    from cell_eval2.anchor import read_anchor, resolve_anchor, validate_anchor
+
+    _pred, real = synthetic_pair_with_effect
+    outdir = build_anchor_dir(real, tmp_path / "a")
+    frame, expect = _expect(outdir)
+    _f, splits, meta = read_anchor(outdir)
+    # the happy path first, so a bundle that is simply broken cannot make this pass. This also
+    # confirms the in-memory branch of `_as_bundle` is what the loop below exercises.
+    resolve_anchor(expect, supplied=(frame, splits, meta))
+
+    # ⚠️ `_ABSENT` is not decoration. Every OTHER value here keeps the key, so a check written
+    # `meta["cell_eval2_version"]` instead of `meta.get(...)` would satisfy every OTHER case and
+    # this test would stay green while an omitted key raised a bare `KeyError` -- the failure
+    # `read_anchor`'s own comment argues against, and the reason `validate_anchor` is the one
+    # boundary using `.get()` (codex checkpoint 2).
+    _ABSENT = object()
+    accepted = []
+    for door in ("supplied", "cached"):
+        for bad in (None, "", "   ", 123, _ABSENT):
+            if bad is _ABSENT:
+                doctored = {k: v for k, v in meta.items() if k != "cell_eval2_version"}
+            else:
+                doctored = {**meta, "cell_eval2_version": bad}
+            shown = "<key absent>" if bad is _ABSENT else bad
+            try:
+                resolve_anchor(expect, **{door: (frame, splits, doctored)})
+            except ValueError as e:
+                msg = str(e)
+                if "not a version string" not in msg:
+                    accepted.append((door, shown, f"wrong error: {msg[:50]}"))
+                # ⚠️ And the message must name the DOOR. Every in-memory tuple used to be
+                # labelled `<cache>` regardless of which door it came through, so without this
+                # the label fix could be reverted with the suite still green (codex checkpoint 2).
+                elif f"<in-memory {door}>" not in msg:
+                    accepted.append((door, shown, f"door not named: {msg[:60]}"))
+            except Exception as e:                    # noqa: BLE001 -- a KeyError is a FAILURE
+                accepted.append((door, shown, f"{type(e).__name__}: {str(e)[:40]}"))
+            else:
+                accepted.append((door, shown, "ACCEPTED"))
+    assert not accepted, accepted
+
+    # ⚠️ And exercise `validate_anchor` DIRECTLY, not only through `resolve_anchor`. Reached only
+    # via the resolver, this test would still pass if the check were MOVED into `resolve_anchor`
+    # and the validator left unguarded -- and `validate_anchor` is public, so a caller can reach
+    # it without the resolver at all (codex checkpoint 2).
+    # ...over the SAME shapes as the routed loop above. With only `None` here, broadening `resolve_anchor` while
+    # narrowing `validate_anchor` to `is None` would leave every routed case green AND this one --
+    # and `validate_anchor` is public, so a direct caller would then accept "", 123 and an absent
+    # key (codex checkpoint 2).
+    direct = []
+    for bad in (None, "", "   ", 123, _ABSENT):
+        if bad is _ABSENT:
+            doctored = {k: v for k, v in meta.items() if k != "cell_eval2_version"}
+        else:
+            doctored = {**meta, "cell_eval2_version": bad}
+        shown = "<key absent>" if bad is _ABSENT else bad
+        try:
+            validate_anchor(frame, doctored, expect, source="direct")
+        except ValueError as e:
+            if "not a version string" not in str(e):
+                direct.append((shown, f"wrong error: {str(e)[:50]}"))
+        except Exception as e:                        # noqa: BLE001 -- a KeyError is a FAILURE
+            direct.append((shown, f"{type(e).__name__}: {str(e)[:40]}"))
+        else:
+            direct.append((shown, "ACCEPTED"))
+    assert not direct, direct
+
+
 # (pattern, expectation override, frame corruption, meta corruption)
 REJECTIONS = [
     ("fingerprint", dict(fingerprint="not-this-dataset"), None, None),
     ("semantic_identity", dict(semantic_identity="not-this-config"), None, None),
-    ("cell_eval2_version", dict(version="0.0.0-not-this"), None, None),
     ("duplicate", {}, lambda f: pl.concat([f, f.head(1)]), None),
     ("missing", {}, lambda f: f.head(f.height - 1), None),
     ("unexpected|extra", {}, lambda f: pl.concat(

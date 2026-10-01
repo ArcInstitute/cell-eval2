@@ -26,7 +26,8 @@ def _moment_key(norm: str) -> str:
     return "counts" if norm == "bulk_lognorm" else norm
 
 
-def _streaming_jackknife(make_blocks, sums, counts, bulk_target_sum, *, chunk=512):
+def _streaming_jackknife(make_blocks, sums, counts, bulk_target_sum, *, chunk=512,
+                         per_gene=False):
     """Second pass: Σᵢ v_ig and Σᵢ v_ig² per group, then C_p = (n-1)/n · Σ_g (s2 - s1²/n).
 
     ``make_blocks`` is a ZERO-ARGUMENT callable yielding ``(X, codes)`` -- the same convention
@@ -74,11 +75,46 @@ def _streaming_jackknife(make_blocks, sums, counts, bulk_target_sum, *, chunk=51
     ok = n >= 2
     out[ok] = np.maximum(((n[ok] - 1) / n[ok])
                          * (s2[ok] - s1[ok] ** 2 / n[ok][:, None]).sum(axis=1), 0.0)
-    return out
+    if not per_gene:
+        return out
+    # APPENDED, following this module's `with_moments`/`with_median_umi` convention, so no
+    # existing caller changes shape. The scalar above is untouched -- same expression, same
+    # order, same clamp -- so asking for the terms cannot move `jk`. `s1`/`s2` are already
+    # `[P_groups, G]`; the scalar reduction sums them away and this keeps them, so the terms
+    # cost one resident array and NOT a second pass over the cells. Not clamped per gene: a
+    # coordinate may be negative at machine precision and clamping each would bias every
+    # restricted sum upward. The clamp belongs on the restricted SUM, which is the floor policy's
+    # job -- and that policy is not on this branch (see `prep.pseudobulk_bulk_lognorm_with_moments`
+    # for the same note); `jackknife_correction` clamps the whole-panel sum it returns.
+    gene = np.zeros((P_groups, s2.shape[1]), dtype=np.float64)
+    gene[ok] = ((n[ok] - 1) / n[ok])[:, None] * (s2[ok] - s1[ok] ** 2 / n[ok][:, None])
+    return out, gene
+
+
+def _check_per_gene_jk(per_gene_jk: bool, with_moments: bool, norms) -> None:
+    """`per_gene_jk=True` must be satisfiable, or it is a silent no-op.
+
+    Both kernels return early when moments are off, and the terms are only ever built for
+    `bulk_lognorm`, so a caller asking for the decomposition under any other combination used to
+    get `jk_gene=None` back with no complaint -- indistinguishable from asking for it and having
+    it come out empty. `signal_fraction_mask` then fails much later, on a `None`.
+    """
+    if not per_gene_jk:
+        return
+    if not with_moments:
+        raise ValueError(
+            "per_gene_jk=True requires with_moments=True: the per-gene terms are part of the "
+            "moments bundle, and the moment-free path returns before any jackknife runs."
+        )
+    if "bulk_lognorm" not in list(norms):
+        raise ValueError(
+            "per_gene_jk=True requires 'bulk_lognorm' in norms -- the decomposition is of THAT "
+            f"comparator's delete-one correction and is not defined for the others. Got {list(norms)!r}."
+        )
 
 
 def streaming_pseudobulk(path, *, pert_col, norms, target_sum, noise=None, device="cpu",
-                         with_median_umi=False, with_moments=False,
+                         with_median_umi=False, with_moments=False, per_gene_jk=False,
                          bulk_target_sum: float = DEFAULT_BULK_TARGET_SUM):
     """Per-perturbation pseudobulk over a packed ``.shad`` archive.
 
@@ -139,11 +175,13 @@ def streaming_pseudobulk(path, *, pert_col, norms, target_sum, noise=None, devic
     if resolve_device(device) == "cuda":
         result = _streaming_pseudobulk_gpu(blocks, perts, P, G, norms, target_sum,
                                            with_moments=with_moments,
+                                           per_gene_jk=per_gene_jk,
                                            bulk_target_sum=bulk_target_sum,
                                            make_blocks=make_blocks)
     else:
         result = _streaming_pseudobulk_cpu(blocks, perts, P, G, norms, target_sum,
                                            with_moments=with_moments,
+                                           per_gene_jk=per_gene_jk,
                                            bulk_target_sum=bulk_target_sum,
                                            make_blocks=make_blocks)
     out, moments = result if with_moments else (result, None)
@@ -167,12 +205,14 @@ def _tee_library_sizes(blocks, sink):
 
 
 def _streaming_pseudobulk_cpu(blocks, perts, P, G, norms, target_sum, with_moments=False,
+                              per_gene_jk=False,
                               bulk_target_sum: float = DEFAULT_BULK_TARGET_SUM, make_blocks=None):
     """CPU grouped-mean over ``blocks`` (fp64 sum-then-divide). Returns ``{norm: (perts, means)}``,
     or ``({norm: (perts, means)}, {norm: GroupMoments})`` when ``with_moments``.
 
     One shard resident at a time; works over nnz (not n_cells*n_genes) via _scatter_rows.
     """
+    _check_per_gene_jk(per_gene_jk, with_moments, norms)
     # bulk_lognorm is DERIVED from the counts accumulator at finalize (issue #264): it reads
     # the group SUM, so it needs no per-cell divide, no per-cell log1p and no target_sum.
     want_bulk = "bulk_lognorm" in norms
@@ -237,21 +277,25 @@ def _streaming_pseudobulk_cpu(blocks, perts, P, G, norms, target_sum, with_momen
         out[n] = (perts.copy(), means)
     if not with_moments:
         return out
-    jk = None
+    jk = jk_gene = None
     if "bulk_lognorm" in norms:
         if make_blocks is None:
             raise ValueError("bulk_lognorm moments require a fresh second-pass block factory")
-        jk = _streaming_jackknife(make_blocks, acc["counts"], counts, bulk_target_sum)
+        got = _streaming_jackknife(make_blocks, acc["counts"], counts, bulk_target_sum,
+                                   per_gene=per_gene_jk)
+        jk, jk_gene = got if per_gene_jk else (got, None)
     moments = {
         n: GroupMoments(perts=perts.copy(), counts=counts.astype(np.float64),
                         sumsq=sumsq[_moment_key(n)],
-                        jk=jk if n == "bulk_lognorm" else None)
+                        jk=jk if n == "bulk_lognorm" else None,
+                        jk_gene=jk_gene if n == "bulk_lognorm" else None)
         for n in norms
     }
     return out, moments
 
 
 def _streaming_pseudobulk_gpu(blocks, perts, P, G, norms, target_sum, with_moments=False,
+                              per_gene_jk=False,
                               bulk_target_sum: float = DEFAULT_BULK_TARGET_SUM, make_blocks=None):
     """GPU grouped-mean over ``blocks`` via :class:`gpu.bulk.GroupedMeanAccumulator`.
 
@@ -260,6 +304,7 @@ def _streaming_pseudobulk_gpu(blocks, perts, P, G, norms, target_sum, with_momen
     ``{norm: (perts, means)}`` shape with fp32 means (the accumulator finalizes to fp32),
     or ``(bulks, {norm: GroupMoments})`` when ``with_moments``.
     """
+    _check_per_gene_jk(per_gene_jk, with_moments, norms)
     from .gpu.bulk import GroupedMeanAccumulator
 
     acc = GroupedMeanAccumulator(
@@ -272,14 +317,15 @@ def _streaming_pseudobulk_gpu(blocks, perts, P, G, norms, target_sum, with_momen
     if with_moments and "bulk_lognorm" in norms:
         if make_blocks is None:
             raise ValueError("bulk_lognorm moments require a fresh second-pass block factory")
-        acc.jackknife(make_blocks)
+        acc.jackknife(make_blocks, per_gene=per_gene_jk)
     finalized = acc.finalize()  # {norm: (group_idx, means_fp32)}; group_idx aligns to perts order
     out = {n: (perts.copy(), finalized[n][1]) for n in norms}
     if not with_moments:
         return out
     raw, jk_by_norm = acc.moments(), (acc.jackknife_by_norm() or {})
+    jkg = acc.jackknife_gene_by_norm() or {}
     return out, {n: GroupMoments(perts=perts.copy(), counts=raw[n][0], sumsq=raw[n][1],
-                                 jk=jk_by_norm.get(n))
+                                 jk=jk_by_norm.get(n), jk_gene=jkg.get(n))
                  for n in norms}
 
 
@@ -294,7 +340,7 @@ def _scatter_rows(dst, grp_of_nnz, Xcsr):
 
 
 def inmem_pseudobulk(adata, *, pert_col, norms, target_sum, device="cpu",
-                     block_rows=_INMEM_BLOCK_ROWS, with_moments=False,
+                     block_rows=_INMEM_BLOCK_ROWS, with_moments=False, per_gene_jk=False,
                      bulk_target_sum: float = DEFAULT_BULK_TARGET_SUM):
     """Grouped-mean pseudobulk over row-blocks of a resident ``adata.X`` via
     :class:`gpu.bulk.GroupedMeanAccumulator`.
@@ -315,6 +361,9 @@ def inmem_pseudobulk(adata, *, pert_col, norms, target_sum, device="cpu",
     from .gpu.bulk import GroupedMeanAccumulator
 
     norms = list(norms)
+    # This reader does NOT route through `_streaming_pseudobulk_cpu`/`_gpu` -- it drives the
+    # accumulator itself -- so it needs its own copy of the guard, not the kernels'.
+    _check_per_gene_jk(per_gene_jk, with_moments, norms)
     # A duplicate-bearing CSR would make Σ‖x‖² wrong: squaring duplicates separately gives
     # a² + b² where the truth is (a + b)². Raise rather than canonicalize -- sum_duplicates()
     # would mutate the caller's matrix, and a defensive copy is untenable at CCL scale
@@ -371,7 +420,7 @@ def inmem_pseudobulk(adata, *, pert_col, norms, target_sum, device="cpu",
     for Xb, block_codes in make_blocks():
         acc.update(Xb, block_codes)
     if with_moments and "bulk_lognorm" in norms:
-        acc.jackknife(make_blocks)
+        acc.jackknife(make_blocks, per_gene=per_gene_jk)
     finalized = acc.finalize()  # {norm: (group_idx aligned to perts order, means_fp32)}
     # Reuse the per-cell totals the accumulator already computed (libs_host) for the counts
     # scale-limit gate: stash the max on the adata (same convention as run.py's
@@ -386,6 +435,8 @@ def inmem_pseudobulk(adata, *, pert_col, norms, target_sum, device="cpu",
     if not with_moments:
         return out
     raw, jk_by_norm = acc.moments(), (acc.jackknife_by_norm() or {})
+    jkg = acc.jackknife_gene_by_norm() or {}
     return out, {norm: GroupMoments(perts=perts.copy(), counts=raw[norm][0],
-                                    sumsq=raw[norm][1], jk=jk_by_norm.get(norm))
+                                    sumsq=raw[norm][1], jk=jk_by_norm.get(norm),
+                                    jk_gene=jkg.get(norm))
                  for norm in norms}

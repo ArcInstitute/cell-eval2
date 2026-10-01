@@ -4,7 +4,7 @@
 protocol (perturbation-complete AnnData batches of stored values), and ``score_cellstream``
 orchestrates one context through ``_build_reference_streaming_core`` / ``score_piece``. All
 normalization (counts CPM / lognorm expm1) happens downstream per ``cfg.input_type`` -- this
-module adds none. See internal:docs/superpowers/specs/2026-07-21-cellstream-scoring-unification-design.md.
+module adds none. See internal:docs/internal/superpowers/specs/2026-07-21-cellstream-scoring-unification-design.md.
 """
 from __future__ import annotations
 
@@ -283,11 +283,20 @@ def _uniform_obs(store, col, default) -> str:
     return default
 
 
-def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None):
+def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_de=False):
     """Score a pair of cell-layout ``.shad`` archives (single context) on the ``partition_inmem``
     engine. Handles counts and lognorm (via the shared in-memory ``compute_de`` + ``_side_bulks``).
     Returns a ``ScoreResult`` (per_pert / per_context / overall). GPU-only (gpudge backend).
+
+    ``write_de`` (#387): also emit the raw gene-level DE tables to ``outdir`` as
+    ``de_real.parquet`` + ``de_pred.parquet`` -- the same artifact ``compute_metrics`` writes
+    under ``--write-degenes``, via the same ``run._write_de_tables`` writer, so the streaming
+    and in-memory paths produce a byte-identical schema. ``de_real`` is the full real DE table
+    the reference builder produces; ``de_pred`` is concatenated from the per-piece pred DE
+    tables. Requires ``outdir`` and at least one DE metric in the selection. Off by default, so
+    existing callers are unaffected.
     """
+    import glob
     import os
     import tempfile
     from dataclasses import replace
@@ -302,8 +311,15 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None):
         _require_partition_config,
         score_piece,
     )
-    from .run import _resolve_config
+    from .run import _resolve_config, _write_de_tables
     from .h5ad_manifest import _assemble_score_result, _nsig_names
+
+    # Fail fast, before any archive I/O, on the one combination that cannot be honoured: the DE
+    # tables have nowhere to land without an outdir (#387).
+    if write_de and outdir is None:
+        raise ValueError(
+            "write_de=True requires outdir; de_real.parquet/de_pred.parquet are written there"
+        )
 
     # Fail fast + normalize the AUC floor (spec §5.3): the core builders each guard internally,
     # but validating once up front raises before any archive I/O when the config is ineligible
@@ -332,7 +348,8 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None):
     )
 
     nsig_spearman, nsig_real, nsig_pred = _nsig_names(cfg)
-    with tempfile.TemporaryDirectory() as ref_dir, tempfile.TemporaryDirectory() as parts_dir:
+    with tempfile.TemporaryDirectory() as ref_dir, tempfile.TemporaryDirectory() as parts_dir, \
+            tempfile.TemporaryDirectory() as de_parts_dir:
         real_src = CellBatchSource(real, pert_col=cfg.pert_col, control=control,
                                    gather_threads=cfg.gather_threads)
         try:
@@ -366,6 +383,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None):
                 score_piece(batch_ad, ref_dir, config=piece_cfg,
                             piece_id=f"ctx_{k}", partial_out=parts_dir, bundle=bundle,
                             comparator=comparator,
+                            de_out=de_parts_dir if write_de else None,
                             # counts -> gpudge normalizes on-GPU (skips the CPU _to_linear copy,
                             # issue #142); lognorm falls through to _to_linear inside compute_de.
                             native_gpu_normalize=True)
@@ -379,6 +397,24 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None):
         full, _agg = aggregate_partials(
             parts_dir, reduce_nsig_spearman=True, nsig_spearman_metric=nsig_spearman,
             nsig_real_metric=nsig_real, nsig_pred_metric=nsig_pred)
+
+        # DE-table export, INSIDE the with-block: ref_dir (real DE) and de_parts_dir (per-piece
+        # pred DE) are both torn down when it exits, so the tables must be read out here (#387).
+        # de_real is the full real DE table the reference builder wrote; de_pred concatenates the
+        # per-piece pred DE tables. Both are handed to run._write_de_tables -- the same writer the
+        # in-memory --write-degenes path uses -- so the emitted schema, validation and atomic
+        # publish are identical across the two paths. It writes to cfg.outdir, so a copy of cfg is
+        # pointed at this call's outdir.
+        if write_de:
+            pred_parts = sorted(glob.glob(os.path.join(de_parts_dir, "*__de_pred.parquet")))
+            if not pred_parts:
+                raise ValueError(
+                    "write_de=True but no pred DE tables were produced -- the metric selection "
+                    "must include at least one DE metric for de_real/de_pred to be emitted"
+                )
+            de_real = pl.read_parquet(os.path.join(ref_dir, "real_de.parquet"))
+            de_pred = pl.concat([pl.read_parquet(p) for p in pred_parts], how="vertical")
+            _write_de_tables(de_real, de_pred, cfg=replace(cfg, outdir=outdir))
 
     full = full.with_columns(
         pl.lit(dataset_tag).alias("dataset"),

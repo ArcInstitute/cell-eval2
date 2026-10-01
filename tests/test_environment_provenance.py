@@ -384,7 +384,7 @@ def test_a_bundle_whose_baseline_meta_predates_this_field_still_reads(counts_bun
 # both point outside this change: the bundles live under a `check_publish_set.SWEEP_TOKENS` path
 # and `tests/**` SHIPs, so the constant alone would be a publish blocker needing a DROP rule in
 # `PUBLISH_SET.txt` -- another branch's file, and #335's session owns it -- and the skip it would
-# need is a new environment gate in `internal:tests/gated_modules.toml` (#344 has since resolved
+# need is a new environment gate in `internal:tests/internal/gated_modules.toml` (#344 has since resolved
 # that FIX by DROPping the table, so a public reader has no such file at all).
 # `test_environment_is_absent_from_the_compared_and_recorded_tuples` above pins the mechanism that
 # actually keeps an old bundle readable, and it needs no host and no gate. (Those bundles will

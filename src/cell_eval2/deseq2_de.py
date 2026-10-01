@@ -6,7 +6,7 @@ reference level), fits via deseq2_gpu (looped ``fit_nb_glm``+``results`` on CPU,
 ``fit_contrasts`` on GPU), and converts to cell_eval2's canonical DE schema. deseq2 owns its
 own LFC + p-values (like gpudge), so ``mean_calc``/``epsilon``/``clip_value`` do not apply and
 ``fdr_scope`` is ignored (native per-contrast padj: Cook's flagging + independent filtering).
-See ``internal:docs/superpowers/specs/2026-07-19-deseq2-backend-design.md``.
+See ``internal:docs/internal/superpowers/specs/2026-07-19-deseq2-backend-design.md``.
 """
 from __future__ import annotations
 

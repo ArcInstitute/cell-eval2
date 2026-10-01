@@ -668,6 +668,26 @@ path — `cell_eval2.partition_inmem.build_reference` / `score_piece` — scores
 
 Neither path has a `cell-eval2` subcommand — drive both from the Python API above.
 
+**Emitting the raw DE tables from the streaming path.** `score_cellstream` (the GPU cell-layout
+scorer — see the README's *Out-of-core scoring* section) takes `outdir=...` to write its
+`ScoreResult` frames, and `write_de=True` to *additionally* emit the gene-level DE tables
+`de_real.parquet` + `de_pred.parquet` — the same pre-rank/threshold artifact the in-memory path
+writes under `--write-degenes`, through the same `run._write_de_tables` writer, so the schema is
+identical across paths. It is off by default, requires `outdir`, and needs at least one DE metric
+in the selection (otherwise there is no `de_pred` to write and it raises):
+
+```python
+from cell_eval2 import score_cellstream, MemBudget
+from cell_eval2.config import EvalConfig
+
+score_cellstream(
+    "pred.csad", "real.csad",
+    config=EvalConfig(device="cuda", pert_col="target_gene"),   # DE-at-scale is GPU-only
+    mem_budget=MemBudget(host_bytes=64 * 2**30, gpu_bytes=40 * 2**30),
+    outdir="results/", write_de=True,   # -> results/de_real.parquet, results/de_pred.parquet
+)
+```
+
 **How this holds up at scale** (Arc's internal benchmark runs, aliased datasets):
 
 - CPU streaming stays memory-bounded: **peak host RSS 54.6 GiB at 5.54 M cells** (CCL_2) —

@@ -212,7 +212,7 @@ def is_decisive(spec: "MetricSpec") -> bool:
     on describes the metric on an ACCURATE PREDICTOR (a real technical replicate), not on
     the generic-response comparator, which carries no target-specific information at all.
     Those are different populations. See
-    ``internal:docs/validation/2026-08-06-vcc2026-rescale-anchors.md``.
+    ``internal:docs/internal/validation/2026-08-06-vcc2026-rescale-anchors.md``.
 
     The change is also right on the merits, not only on the measurement: when ``D <= 0`` the
     metric cannot be scored against that baseline in ANY profile, so failing loud in

@@ -173,6 +173,16 @@ def _piece():
                       var={"gene": [f"g{i}" for i in range(4)]})
 
 
+def _piece_on_bundle_genes():
+    """Like ``_piece`` but with var_names set to the bundle's gene axis (``g0..g3``), so a piece
+    that runs PAST ``validate_gene_axis`` (the tests that reach the DE section) is scored against
+    the reference the bundle was built on. ``_piece`` leaves a RangeIndex, which those tests never
+    exercise because they stop at ``load_anndata``."""
+    piece = ad.AnnData(X=np.ones((2, 4), dtype=np.float32), obs={"target_gene": ["A", "B"]})
+    piece.var_names = [f"g{i}" for i in range(4)]
+    return piece
+
+
 @pytest.fixture
 def _no_reads_allowed(monkeypatch):
     """Both guard tests must fail if the guards ever move BELOW the piece load or the manifest
@@ -295,6 +305,73 @@ def test_score_piece_still_rejects_a_bundle_built_for_a_genuinely_different_conf
     with pytest.raises(ValueError, match="different config"):
         partition_inmem.score_piece(_piece(), d, config=cfg, bundle=bundle,
                                     comparator=resolved_comparator(cfg))
+
+
+# --- #387: score_piece's opt-in per-piece pred DE export (the write score_cellstream depends on) -
+
+def test_score_piece_writes_the_pred_de_table_when_de_out_is_set(tmp_path, monkeypatch):
+    """#387 GUARD: score_piece(de_out=...) must write the raw per-piece pred DE table as
+    ``{piece_id}__de_pred.parquet``. score_cellstream's write_de export concatenates these; its
+    own integration test STUBS score_piece, so this is the only test that pins the ACTUAL write in
+    score_piece -- deleting the ``if de_out is not None:`` block would otherwise pass unnoticed.
+    The DE compute is GPU-only, so compute_de is stubbed and the run is stopped at prepare_de,
+    which sits immediately AFTER the write: reaching that sentinel with the file already on disk is
+    the assertion."""
+    d = _write_bundle_with_target(str(tmp_path), 54611.0)
+    # DE-only selection so the anndata metric section is skipped (no pseudobulk dispatch needed).
+    cfg = replace(EvalConfig.v2(), pert_col="target_gene",
+                  metrics=["de_wilcoxon_lfc_nmae"], target_sum=54611.0)
+    bundle = partition_inmem._RefBundle(d, cfg)
+
+    fake_pred_de = pl.DataFrame({"target": ["A", "B"], "feature": ["g0", "g1"],
+                                 "log2_fold_change": [1.0, 2.0], "p_adj": [0.1, 0.2]})
+    monkeypatch.setattr(partition_inmem, "compute_de", lambda *a, **k: fake_pred_de)
+    monkeypatch.setattr(partition_inmem, "_check_control_space", lambda *a, **k: None)
+
+    class _StoppedAfterWrite(Exception):
+        pass
+
+    def _stop(*a, **k):
+        raise _StoppedAfterWrite
+
+    monkeypatch.setattr(partition_inmem, "prepare_de", _stop)
+
+    de_out = tmp_path / "de_parts"
+    de_out.mkdir()
+    with pytest.raises(_StoppedAfterWrite):
+        partition_inmem.score_piece(_piece_on_bundle_genes(), d, config=cfg, bundle=bundle,
+                                    piece_id="ctx_0", de_out=str(de_out))
+
+    written = pl.read_parquet(de_out / "ctx_0__de_pred.parquet")
+    assert written["target"].to_list() == ["A", "B"]                 # the pred_de was written
+    assert {"target", "feature", "log2_fold_change", "p_adj"} <= set(written.columns)
+
+
+def test_score_piece_does_not_write_de_when_de_out_is_none(tmp_path, monkeypatch):
+    """The default: with no de_out, score_piece writes no per-piece DE parquet. Same stop-at-
+    prepare_de seam, so the absence of a write is what distinguishes the two paths."""
+    d = _write_bundle_with_target(str(tmp_path), 54611.0)
+    cfg = replace(EvalConfig.v2(), pert_col="target_gene",
+                  metrics=["de_wilcoxon_lfc_nmae"], target_sum=54611.0)
+    bundle = partition_inmem._RefBundle(d, cfg)
+
+    monkeypatch.setattr(partition_inmem, "compute_de",
+                        lambda *a, **k: pl.DataFrame({"target": ["A"], "feature": ["g0"],
+                                                      "log2_fold_change": [1.0], "p_adj": [0.1]}))
+    monkeypatch.setattr(partition_inmem, "_check_control_space", lambda *a, **k: None)
+
+    class _Stopped(Exception):
+        pass
+
+    monkeypatch.setattr(partition_inmem, "prepare_de",
+                        lambda *a, **k: (_ for _ in ()).throw(_Stopped()))
+
+    de_out = tmp_path / "de_parts"
+    de_out.mkdir()
+    with pytest.raises(_Stopped):
+        partition_inmem.score_piece(_piece_on_bundle_genes(), d, config=cfg, bundle=bundle,
+                                    piece_id="ctx_0")
+    assert list(de_out.iterdir()) == []
 
 
 def test_bundle_identity_hash_excludes_only_target_sum(tmp_path):

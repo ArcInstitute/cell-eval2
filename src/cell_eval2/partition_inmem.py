@@ -993,7 +993,8 @@ class _RefBundle:
 
 
 def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=None,
-                native_gpu_normalize=False, bundle=None, comparator=None) -> pl.DataFrame:
+                native_gpu_normalize=False, bundle=None, comparator=None,
+                de_out=None) -> pl.DataFrame:
     """Score one in-memory pred piece (perturbed cells only, NO controls) against the
     cached reference bundle written by ``build_reference``, mirroring
     ``scale.score_streaming``'s dispatch pattern but reading cached real artifacts
@@ -1021,6 +1022,12 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
     ``{piece_id}.parquet`` + ``{piece_id}.json`` (meta with ``perturbations``);
     ``piece_id`` defaults to the pred file stem for a path input and otherwise must
     be given explicitly (an in-memory AnnData has no file stem -- PR #83 review).
+
+    ``de_out`` (opt-in, #387): when set, also write this piece's raw pred DE table
+    (the ``compute_de`` output, pre-rank/threshold) as ``{piece_id}__de_pred.parquet``
+    into that directory, so a per-piece driver (``score_cellstream``) can concatenate
+    them into the full ``de_pred.parquet`` the ``--write-degenes`` artifact emits.
+    Requires ``piece_id`` and a DE metric in the selection; otherwise a no-op.
 
     ``bundle``: a ``_RefBundle`` for ``cache_dir``, so a driver scoring many pieces against one
     reference reads each cached artifact once instead of once per piece (#153). Omitted -> one is
@@ -1176,6 +1183,14 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
                 fdr_scope=cfg.de.fdr_scope, filter_gene_min_cpm_cell=cfg.filter.filter_gene_min_cpm_cell,
                 threads=cfg.num_threads, native_gpu_normalize=native_gpu_normalize,
             )
+            # Export the raw per-piece pred DE table (pre-rank/threshold) before it is filtered,
+            # matching what compute_metrics writes under --write-degenes. The piece's cells are
+            # its own perturbations, so this frame's targets are already this piece's -- the
+            # concatenation over pieces in score_cellstream reconstructs the full de_pred (#387).
+            if de_out is not None:
+                if piece_id is None:
+                    raise ValueError("score_piece needs an explicit piece_id to write de_out")
+                pred_de.write_parquet(os.path.join(de_out, f"{piece_id}__de_pred.parquet"))
             real_de = real_de.filter(pl.col("target").is_in(piece_perts))
             pred_de = pred_de.filter(pl.col("target").is_in(piece_perts))
             prepared = prepare_de(

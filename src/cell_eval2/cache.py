@@ -197,7 +197,24 @@ def _dump_npz_moments(value, tmp: str) -> None:
                  # EMPTY correction that correction_for would index into. Absence gets its own
                  # key; exactly one of the two is ever written.
                  **({"jk_absent": np.array(True)} if jk is None
-                    else {"jk": np.asarray(jk, dtype=np.float64)}))
+                    else {"jk": np.asarray(jk, dtype=np.float64)}),
+                 # ⚠️ THE CACHE KEY DOES NOT DISCRIMINATE ON `per_gene_jk`. The artifact identity
+                 # hashes key + fingerprint + params, and neither `run.py`'s nor `scale.py`'s
+                 # cached-params set includes the flag -- so a warm artifact written with the pass
+                 # OFF is a HIT for a caller that wants the terms, and that caller gets
+                 # `jk_gene=None`. Today that is only reachable by hand, because nothing in `src`
+                 # requests the terms, and it fails loudly on the `None` rather than serving wrong
+                 # numbers. Before any SCORED path asks for them, the flag has to enter the params
+                 # (or the terms need their own key) so a floor-off artifact MISSES instead.
+                 # Same class as the DE cache key that ignores code semantics; do not let a
+                 # scoring consumer land ahead of this.
+                 # `jk_gene` is OPTIONAL, unlike `jk`: it exists only on a run configured with
+                 # a signal-fraction floor, so its ABSENCE is the ordinary case and does not
+                 # need an explicit marker the way a null `jk` does. A cache written without it
+                 # cannot be reused by a run that needs it -- `correction_per_gene_for` raises
+                 # with the rebuild instruction rather than scoring the wrong gene set.
+                 **({} if moments.jk_gene is None
+                    else {"jk_gene": np.asarray(moments.jk_gene, dtype=np.float64)}))
 
 
 def _load_npz_moments(path: str):
@@ -219,15 +236,19 @@ def _load_npz_moments(path: str):
         if has_absent and not bool(z["jk_absent"]):
             raise ValueError("npz_moments jk_absent is present but not true")
         jk = None if has_absent else z["jk"]
+        jk_gene = z["jk_gene"] if "jk_gene" in z.files else None
     if (perts.ndim != 1 or means.ndim != 2 or means.shape[0] != perts.shape[0]
             or counts.shape != perts.shape or sumsq.shape != perts.shape
-            or (jk is not None and jk.shape != perts.shape)):
+            or (jk is not None and jk.shape != perts.shape)
+            or (jk_gene is not None and jk_gene.shape != means.shape)):
         raise ValueError(
             f"npz_moments shape mismatch: perts {perts.shape}, means {means.shape}, "
             f"counts {counts.shape}, sumsq {sumsq.shape}, "
-            f"jk {None if jk is None else jk.shape}"
+            f"jk {None if jk is None else jk.shape}, "
+            f"jk_gene {None if jk_gene is None else jk_gene.shape}"
         )
-    return (perts, means), GroupMoments(perts=perts, counts=counts, sumsq=sumsq, jk=jk)
+    return (perts, means), GroupMoments(perts=perts, counts=counts, sumsq=sumsq, jk=jk,
+                                        jk_gene=jk_gene)
 
 
 def _dump_parquet(value: pl.DataFrame, tmp: str) -> None:

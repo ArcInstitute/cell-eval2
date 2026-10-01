@@ -1,6 +1,6 @@
 [project]
 name = "cell-eval2"
-version = "0.16.0"
+version = "0.18.0"
 description = "Clean, streamlined, GPU-accelerated reimplementation of cell-eval"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -95,9 +95,19 @@ dev = [
     # pass the exception class explicitly, so a tool that exists and raises anything OTHER than
     # ModuleNotFoundError fails loudly instead of skipping (pytest 8.x skips on any ImportError).
     "pytest>=8.2",
-    "ruff>=0.6",
+    # PINNED, not `>=`: CI installs this group fresh, so an unpinned linter turns `main` red
+    # on ruff's release schedule with no code change -- which is what happened between #379
+    # merging and #380 (0.16.4 flags 28 E70x/E731 in tools/gene_qc that 0.16.2 did not), and
+    # it also means a local `ruff check` can disagree with the gate. Bump deliberately.
+    "ruff==0.16.4",
     "scikit-learn>=1.3",
     "cell-eval==0.7.2",
+    # PINNED for the same reason as `ruff`, and with more at stake: `tests/test_golden_score.py`
+    # pins all six scored members -- five bit-exactly, `de_wilcoxon_lfc_nmae` to 4 ULP -- and pdex
+    # is the engine behind FOUR of them, the `de_*` ones. It reaches this environment only as a
+    # transitive `pdex>=0.2.2` of `cell-eval==0.7.2` -- an unpinned floor on the engine behind a
+    # numeric pin. A bump here means re-measuring the GOLDEN table, deliberately (#381).
+    "pdex==0.3.0",
 ]
 
 [tool.hatch.build.targets.wheel]

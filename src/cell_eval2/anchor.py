@@ -630,6 +630,18 @@ def read_anchor(source) -> tuple[pl.DataFrame, pl.DataFrame, dict]:
             f"anchor sidecar ({meta_path}) is missing {missing_meta}; it cannot be checked "
             "against this run. Rebuild the anchor."
         )
+    # PRESENCE means a REAL STAMP. #381 stopped COMPARING this field in `validate_anchor`, and
+    # that comparison was what used to reject a null. Hardened HERE and not in `_REQUIRED_META`:
+    # that tuple is shared with the CACHE door, where a malformed value must be a MISS and a
+    # recompute rather than an aborted run -- see `_bundle_from_obj`, which raises `_BadBundle`
+    # for the same value. The two doors want opposite outcomes, so the check lives at each.
+    version = meta["cell_eval2_version"]          # present: `missing_meta` checked just above
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(
+            f"{source}: anchor sidecar records cell_eval2_version={version!r}, which is not a "
+            "version string. Recorded rather than compared as of #381, but an anchor still has "
+            "to say which release built it."
+        )
     frame = pl.read_parquet(os.path.join(outdir, ANCHOR_AGG))
     splits = pl.read_parquet(os.path.join(outdir, ANCHOR_SPLITS))
     if missing := set(_ANCHOR_SCHEMA) - set(frame.columns):
@@ -664,13 +676,20 @@ class AnchorExpect:
     enforces the strength at its own boundary instead, by refusing a user run that has no
     strict fingerprint.
 
-    One object rather than five loose kwargs, because five kwargs is how the first draft
+    One object rather than three loose kwargs, because three kwargs is how the first draft
     ended up with `score` passing none of them and a test handing the anchor its own
     metadata back as its own expectation.
+
+    `cell_eval2_version` was a fourth field until #381. It is NOT carried unused: an unused
+    comparison input is how a dropped gate quietly returns. The version is still recorded in
+    the anchor sidecar and hashed into `anchor_digest`, and it is still REQUIRED to be a
+    well-formed stamp -- `expect_from_run_meta` requires the key AND rejects `None`, `""` and
+    any non-string, and `validate_anchor` re-checks the value for the in-memory route that
+    reaches no reader. What went is the COMPARISON, not the contract: a version that DISAGREES
+    now enrols; a version that is absent or malformed still fails closed.
     """
     fingerprint: str
     semantic_identity: str
-    version: str
     metrics: tuple[str, ...]
 
 
@@ -682,12 +701,36 @@ def validate_anchor(frame, meta, expect: AnchorExpect, *, source) -> None:
     fields that cannot change a number and would reject a legitimate anchor. `config_hash`
     stays in the meta as provenance.
     """
+    # PRESENCE means a REAL STAMP, checked HERE because this is the ONE guard every door runs.
+    # #381 removed the version COMPARISON, and that comparison was the only thing validating the
+    # version on the IN-MEMORY route: `_as_bundle`'s tuple branch returns `(frame, meta)` without
+    # going through `read_anchor` or `_bundle_from_obj`, so a caller passing
+    # `resolve_anchor(expect, supplied=(frame, splits, {"cell_eval2_version": None, ...}))` skipped
+    # both readers' checks entirely. MEASURED post-change, before this check existed: None, "" and
+    # 123 were all ACCEPTED on both the supplied and cached doors (Copilot, PR #382).
+    #
+    # A RAISE is right for every route that reaches here: `resolve_anchor` never recomputes at
+    # score time, so there is no miss to fall back to. The cache door's MISS happens upstream in
+    # `cached_anchor`/`_bundle_from_obj`, which never reaches this line with a bad value.
+    # ⚠️ `.get()`, not `[...]`, and deliberately so: this is the one boundary where the key is
+    # NOT guaranteed present. `_REQUIRED_META` has already run on both reader routes, but the
+    # in-memory route reaches here with whatever dict the caller passed. MEASURED: `.get()` turns
+    # `supplied=(frame, splits, {})` into this source-named ValueError, while `meta[...]` raises a
+    # bare `KeyError: 'cell_eval2_version'` -- the "dies naming the validator instead of the
+    # source" failure `read_anchor`'s own comment argues against (Gemini suggested `[...]` here,
+    # PR #382; declined on that evidence).
+    version = meta.get("cell_eval2_version")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(
+            f"anchor ({source}) records cell_eval2_version={version!r}, which is not a version "
+            "string. The field is recorded rather than compared as of #381, but an anchor still "
+            "has to say which release built it."
+        )
     # `real_fingerprint` is the STRICT content hash and the only fingerprint compared.
     # `real_fingerprint_meta` sits in the sidecar as provenance and is never a fallback:
     # degrading to it would accept a different X under identical structure.
     for field, want in (("real_fingerprint", expect.fingerprint),
-                        ("semantic_identity", expect.semantic_identity),
-                        ("cell_eval2_version", expect.version)):
+                        ("semantic_identity", expect.semantic_identity)):
         got = meta.get(field)
         if got != want:
             raise ValueError(
@@ -827,8 +870,13 @@ def resolve_anchor(expect: AnchorExpect, *, supplied=None, cached=None):
         if src is None:
             continue
         frame, meta = _as_bundle(src)
+        # ⚠️ Name the DOOR, not the shape. Every tuple used to be labelled `<cache>`, but the
+        # in-memory 3-tuple is accepted on the SUPPLIED door too, so a supplied artifact's
+        # validation error read `anchor (<cache>)` -- misreporting which door failed, in the one
+        # message whose whole job is to name the source (Copilot, PR #382).
         validate_anchor(frame, meta, expect,
-                        source=str(src) if not isinstance(src, tuple) else "<cache>")
+                        source=str(src) if not isinstance(src, tuple)
+                        else f"<in-memory {label}>")
         return frame, meta, label
     raise ValueError(
         "no anchor available: none was supplied and none is cached for this dataset. "
@@ -902,6 +950,18 @@ def _bundle_from_obj(obj) -> tuple[pl.DataFrame, pl.DataFrame, dict]:
         raise _BadBundle(
             f"bundle meta is {type(meta).__name__} missing "
             f"{[f for f in _REQUIRED_META if not isinstance(meta, dict) or f not in meta]}"
+        )
+    # PRESENCE means a REAL STAMP here too, but in THIS door's idiom. #381 stopped comparing
+    # the field in `validate_anchor`, and the comparison was what used to reject a null -- so a
+    # cached None/""/123 would otherwise be accepted and reused. `_BadBundle` is what keeps the
+    # boundary right: `cached_anchor` turns it into a MISS and a recompute, never the aborted
+    # run this docstring warns about. `read_anchor` RAISES on the same value; `_REQUIRED_META`
+    # stays presence-only precisely because the two doors want opposite outcomes.
+    version = meta["cell_eval2_version"]          # present: `_REQUIRED_META` checked just above
+    if not isinstance(version, str) or not version.strip():
+        raise _BadBundle(
+            f"cached bundle meta records cell_eval2_version={version!r}, which is not a "
+            "version string"
         )
     try:
         anchor = pl.DataFrame(obj["anchor"], schema=_ANCHOR_SCHEMA)

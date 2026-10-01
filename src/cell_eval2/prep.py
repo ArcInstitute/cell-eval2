@@ -4,7 +4,7 @@ import anndata as ad
 import numpy as np
 from scipy.sparse import issparse
 
-from .moments import GroupMoments, jackknife_correction
+from .moments import GroupMoments, jackknife_correction, jackknife_per_gene
 
 
 def _group_row_index(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -361,7 +361,8 @@ def pseudobulk_bulk_lognorm(adata, pert_col: str, *, bulk_target_sum: float):
     return perts, bulk_lognorm_means(sums, bulk_target_sum)
 
 
-def pseudobulk_bulk_lognorm_with_moments(adata, pert_col: str, *, bulk_target_sum: float):
+def pseudobulk_bulk_lognorm_with_moments(adata, pert_col: str, *, bulk_target_sum: float,
+                                         per_gene_jk: bool = False):
     """``(perts, means, GroupMoments)`` in the ``bulk_lognorm`` space, from a COUNTS ``adata``.
 
     The RESIDENT reference every driver is asserted against (spec §6 test 7): cells are resident,
@@ -409,11 +410,29 @@ def pseudobulk_bulk_lognorm_with_moments(adata, pert_col: str, *, bulk_target_su
     codes = np.empty(adata.n_obs, dtype=np.intp)
     for p in range(n_groups):
         codes[order[bounds[p]:bounds[p + 1]]] = p
+    # `per_gene_jk` carries the jackknife's per-gene decomposition alongside its scalar sum,
+    # which is what a signal-fraction floor needs (it scores a gene SUBSET, so both sides'
+    # corrections have to be restricted to that subset). ⚠️ No consumer of that kind ships on
+    # this branch -- the floor policy and its gene-subset plumbing live on the local
+    # `fix/expr-mse-signal-fraction-floor` branch, which is also where `rule_version` moves to 4.
+    # These are the primitives only; nothing in `src` here restricts anything.
+    # Gated because it is O(P*G) resident: 44 MB at 300 x 18,533, 3 GB at 20,000 perturbations.
+    # The two kernels share `_loo_bulk`, and `jackknife_per_gene(...).sum(1)` clamped at zero is
+    # `jackknife_correction(...)` exactly (verified additive to 2e-16), so this computes the
+    # per-gene form and reduces it rather than running the same O(n*G) pass twice.
+    if per_gene_jk:
+        # The per-gene kernel returns the scalar too, computed with the scalar kernel's own
+        # expression -- so `jk` is bit-identical whichever route built it, and the whole-panel
+        # `expr_mse_unbiased` diagnostic does not move when the floor is switched on.
+        jk_gene, jk = jackknife_per_gene(adata.X, codes, n_groups, bulk_target_sum)
+    else:
+        jk_gene = None
+        jk = jackknife_correction(adata.X, codes, n_groups, bulk_target_sum)
     return perts, bulk_lognorm_means(_grouped_sums(adata.X, order, bounds, n_groups),
                                      bulk_target_sum), GroupMoments(
         perts=perts, counts=np.diff(bounds).astype(np.float64),
         sumsq=_grouped_sumsq(adata.X, order, bounds, n_groups),
-        jk=jackknife_correction(adata.X, codes, n_groups, bulk_target_sum))
+        jk=jk, jk_gene=jk_gene)
 
 
 def _grouped_sumsq(X, order, bounds, n_groups) -> np.ndarray:

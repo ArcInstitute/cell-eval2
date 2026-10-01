@@ -347,6 +347,13 @@ def expect_from_run_meta(meta: dict) -> AnchorExpect:
     X on the hot path), so a default run carries the metadata hash -- under which two
     datasets with identical shape, dtype, gene names and per-cell labels but different `X`
     are indistinguishable. Refuse and name the flag rather than silently weakening the gate.
+
+    `cell_eval2_version` is required and VALIDATED, but it is not an EXPECTATION: #381 demoted
+    the version from a comparison, not from the contract, so the value is read just below to
+    reject a missing, empty or non-string stamp and is then never compared against anything. It
+    is still stamped by `build_run_meta` and still recorded in the manifest; a run_meta that
+    omits it is malformed, and this is the only place on the `--real-bundle` path that would
+    still notice.
     """
     required = ("source_fingerprint", "source_fingerprint_strict", "cell_eval2_version",
                 "anchor_semantic_identity", "anchor_metric_names")
@@ -361,6 +368,17 @@ def expect_from_run_meta(meta: dict) -> AnchorExpect:
                 "Re-run `cell-eval2 run` on a host where that backend is available to "
                 "regenerate them."
             )
+    # PRESENCE means a REAL STAMP, not merely a key. #381 stopped COMPARING this field, and the
+    # comparison was what used to reject a null: measured pre-change, `{"cell_eval2_version":
+    # None}` was refused by the peer loop. A key-only check lets None, "" and 123 all through.
+    version = meta["cell_eval2_version"]          # present: the `required` loop is just above
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(
+            f"run_meta.json records cell_eval2_version={version!r}, which is not a version "
+            "string. The field is recorded rather than compared as of #381, but it must still be "
+            "a real stamp: `build_run_meta` writes one unconditionally, so an empty or non-string "
+            "value means the file was hand-edited or truncated."
+        )
     if not meta["source_fingerprint_strict"]:
         raise ValueError(
             "this run's source_fingerprint is metadata-only (source_fingerprint_strict is "
@@ -370,7 +388,6 @@ def expect_from_run_meta(meta: dict) -> AnchorExpect:
         )
     return AnchorExpect(fingerprint=meta["source_fingerprint"],
                         semantic_identity=meta["anchor_semantic_identity"],
-                        version=meta["cell_eval2_version"],
                         metrics=tuple(meta["anchor_metric_names"]))
 
 
@@ -961,7 +978,9 @@ def score_metrics(
             if rule is None:
                 logger.warning(
                     "real bundle %r is a DIAGNOSTIC bundle (profile=%r): %s. from_replicate is "
-                    "reported and from_baseline keeps its avg_score.",
+                    "reported and from_baseline keeps its avg_score. The rule gate is SKIPPED for a "
+                    "diagnostic bundle, and `cell_eval2_version` is not compared (#381), so these "
+                    "numbers carry no cross-release comparability guarantee.",
                     rb_manifest.get("real_bundle_id"), rb_manifest.get("profile"),
                     "; ".join(rb_manifest.get("rule_mismatches") or ["no reason recorded"]))
             # ⚠️ INDEPENDENT conditions, and the enrolment predicate is spelled out rather

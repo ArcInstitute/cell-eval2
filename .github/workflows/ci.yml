@@ -52,7 +52,7 @@ jobs:
       - run: .venv/bin/pytest tests/ -q -ra
       # ⚠️ GUARDED, see the `run:` block: this unit is Arc-internal and is absent from the
       # public tree copy, where both steps no-op instead of failing (#335).
-      # tests/gated_modules.toml derives its verdicts from a table of what this environment
+      # tests/internal/gated_modules.toml derives its verdicts from a table of what this environment
       # provides. Nothing pins that resolution, so check the table against the interpreter that
       # actually got installed -- otherwise a resolver change (numba leaving scanpy, say) makes
       # every verdict quietly wrong while the suite stays green. `always()` so a red suite and
@@ -60,8 +60,8 @@ jobs:
       - name: Gate manifest environment table is current
         if: always()
         run: |
-          # ⚠️ ONE ci.yml SERVES TWO REPOS. The gate-manifest unit (tests/gated_modules.toml,
-          # tools/gate_manifest.py, tests/test_gate_manifest.py) is Arc-internal and does NOT
+          # ⚠️ ONE ci.yml SERVES TWO REPOS. The gate-manifest unit (tests/internal/gated_modules.toml,
+          # tools/gate_manifest.py, tests/internal/test_gate_manifest.py) is Arc-internal and does NOT
           # travel to the public tree copy: it measures the gap between a GitHub CPU runner and
           # an Arc CUDA node carrying private packages, which no public reader can reproduce.
           # internal:tools/publish/publish.py clean-replaces rather than edits, so this workflow
@@ -69,19 +69,19 @@ jobs:
           # a guard rather than a deletion. Without it the public tree's CI is red on arrival.
           # The ruling and the measurement behind it are recorded in the source repository's
           # publication manifest, which is internal and does not ship here (#335).
-          if [ ! -f tests/gated_modules.toml ]; then
-            echo "no tests/gated_modules.toml here -- the gate manifest does not ship to this tree; nothing to check (no-op, exit 0)"
+          if [ ! -f tests/internal/gated_modules.toml ]; then
+            echo "no tests/internal/gated_modules.toml here -- the gate manifest does not ship to this tree; nothing to check (no-op, exit 0)"
             exit 0
           fi
           .venv/bin/python tools/gate_manifest.py --validate-env ci
       # Publish the coverage gap on the run summary page rather than leaving it in the log.
       # Guarded like the step above, and for the same reason (#335).
-      # tests/test_gate_manifest.py is what keeps this table honest; this step only prints it.
+      # tests/internal/test_gate_manifest.py is what keeps this table honest; this step only prints it.
       - name: What this run did not cover
         if: always()
         run: |
-          if [ ! -f tests/gated_modules.toml ]; then
-            echo "no tests/gated_modules.toml here -- the gate manifest does not ship to this tree; nothing to check (no-op, exit 0)"
+          if [ ! -f tests/internal/gated_modules.toml ]; then
+            echo "no tests/internal/gated_modules.toml here -- the gate manifest does not ship to this tree; nothing to check (no-op, exit 0)"
             exit 0
           fi
           report="$RUNNER_TEMP/gate_report.txt"

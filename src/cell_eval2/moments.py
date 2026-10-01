@@ -64,6 +64,15 @@ class GroupMoments:
                         # `lognorm`, and in RAW COUNTS space on the `bulk_lognorm` path,
                         # where the correction is `jk` and this is carried for diagnostics
     jk: np.ndarray | None = None   # [P] fp64 delete-1 jackknife C_p, bulk_lognorm only; None elsewhere
+    #: [P, G] fp64 -- the PER-GENE terms whose sum is `jk` (`jackknife_per_gene`). Carried only
+    #: when a signal-fraction floor is configured, because that is the one thing that needs a
+    #: correction restricted to a gene SUBSET; `None` is the pre-floor artifact and every
+    #: whole-panel consumer keeps reading the scalar `jk`.
+    #:
+    #: ⚠️ `O(P*G)` RESIDENT -- 44 MB at the competition's 300 x 18,533, but 3 GB at the
+    #: 20,000-perturbation panels this package's scale notes size against. That is why it is
+    #: gated on the floor rather than always built.
+    jk_gene: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         perts = np.asarray(self.perts)
@@ -90,6 +99,20 @@ class GroupMoments:
                     f"perts {perts.shape}"
                 )
             object.__setattr__(self, "jk", jk)
+        if self.jk_gene is not None:
+            if self.jk is None:
+                raise ValueError(
+                    "GroupMoments.jk_gene without jk: the per-gene terms are the scalar "
+                    "correction's decomposition, so a reader cannot audit one without the "
+                    "other. Carry both or neither."
+                )
+            jg = np.asarray(self.jk_gene, dtype=np.float64)
+            if jg.ndim != 2 or jg.shape[0] != perts.shape[0]:
+                raise ValueError(
+                    f"GroupMoments.jk_gene must be [P, G] with P = {perts.shape[0]}; "
+                    f"got {jg.shape}"
+                )
+            object.__setattr__(self, "jk_gene", jg)
 
 
 def _loo_bulk(P, Y_block, r, bulk_target_sum, *, xp=np):
@@ -135,8 +158,17 @@ def _loo_bulk(P, Y_block, r, bulk_target_sum, *, xp=np):
 
 
 def jackknife_correction(X, group_codes, n_groups: int,
-                         bulk_target_sum: float, *, chunk: int = 512) -> np.ndarray:
+                         bulk_target_sum: float, *, chunk: int = 512,
+                         gene_mask: np.ndarray | None = None) -> np.ndarray:
     """Delete-1 jackknife ``C_p`` for the ``bulk_lognorm`` comparator (issue #264 §3.6).
+
+    ``gene_mask`` is an optional ``[n_groups, G]`` boolean: where given, group ``p``'s sum runs
+    over ``gene_mask[p]`` only, which is the restricted correction the signal-fraction floor
+    needs (:func:`signal_fraction_mask`). The per-gene decomposition is exact -- ``C_p`` is
+    ``sum_g q_pg`` and was verified additive to 2e-16 -- so restricting the sum is
+    the same operation as scoring fewer genes, not an approximation. The clamp at zero moves
+    with it: a *restricted* correction is still a variance, so it is the RESTRICTED sum that is
+    clamped, never the whole-panel one.
 
         r_i  = S_p - lib_i          S_p = Σ_g P_p,g,  lib_i = Σ_g y_ig
         v_ig = log1p( TS * (P_p,g - y_ig) / r_i )
@@ -212,6 +244,14 @@ def jackknife_correction(X, group_codes, n_groups: int,
     if codes.size != X.shape[0]:
         raise ValueError(
             f"group_codes has {codes.size} entries for {X.shape[0]} rows")
+    if gene_mask is not None:
+        gene_mask = np.asarray(gene_mask)
+        if gene_mask.dtype != bool or gene_mask.shape != (n_groups, X.shape[1]):
+            raise ValueError(
+                f"gene_mask must be a boolean array of shape ({n_groups}, {X.shape[1]}); got "
+                f"dtype {gene_mask.dtype} shape {gene_mask.shape}. A non-boolean mask is read "
+                "as positional indices, which would silently sum the wrong genes."
+            )
     out = np.zeros(n_groups, dtype=np.float64)
     order = np.argsort(codes, kind="stable")
     bounds = np.searchsorted(codes[order], np.arange(n_groups + 1))
@@ -235,8 +275,164 @@ def jackknife_correction(X, group_codes, n_groups: int,
                           bulk_target_sum)
             s1 += V.sum(axis=0)
             s2 += np.einsum("ij,ij->j", V, V)   # no V*V temporary
-        out[p] = max(((n - 1) / n) * float((s2 - s1 ** 2 / n).sum()), 0.0)
+        q = s2 - s1 ** 2 / n
+        if gene_mask is not None:
+            # Boolean, checked: `q[integer_array]` is positional FANCY INDEXING, so a 0/1
+            # integer matrix would silently read gene 0 and gene 1 repeatedly instead of
+            # masking (codex review).
+            q = q[gene_mask[p]]
+        out[p] = max(((n - 1) / n) * float(q.sum()), 0.0)
     return out
+
+
+def jackknife_per_gene(X, group_codes, n_groups: int, bulk_target_sum: float, *,
+                       chunk: int = 512) -> tuple[np.ndarray, np.ndarray]:
+    """``([n_groups, G], [n_groups])``: the per-gene terms ``q_pg = ((n-1)/n) * (s2 - s1^2/n)_g``
+    AND the scalar ``C_p`` that :func:`jackknife_correction` returns.
+
+    ⚠️ The scalar is returned rather than left to the caller to sum, and it is computed with the
+    SAME expression as the scalar kernel -- ``max(((n-1)/n) * (s2 - s1^2/n).sum(), 0.0)``, the
+    factor applied once to the summed deviations. ``sum(((n-1)/n) * q_g)`` is not bit-identical
+    to it (floating multiplication does not distribute exactly over summation), so summing the
+    per-gene terms would move the whole-panel ``expr_mse_unbiased`` diagnostic on a floored run
+    and break the claim that turning the floor on changes nothing else (codex review).
+
+    This exists for ONE caller -- building the signal-fraction gene set at reference-prep time
+    (:func:`signal_fraction_mask`) -- and it is deliberately not the primitive the scalar kernel
+    is built on, because it is ``O(P*G)`` RESIDENT where that one is ``O(G)``: 300 x 18,533 fp64
+    is 44 MB, which is fine for a competition panel and is 3 GB at the 20,000-perturbation
+    panels ``_drop_on_target`` sizes its own notes against. Compute it, derive the mask, drop it.
+
+    NOT clamped per gene. ``q_pg`` is an unbiased-ish per-coordinate variance term and individual
+    coordinates may come out slightly negative at machine precision; clamping here would bias
+    every restricted sum upward. The clamp belongs on the sum, which is where
+    :func:`jackknife_correction` puts it.
+    """
+    X = X.tocsr() if issparse(X) else csr_matrix(X)
+    codes = np.asarray(group_codes, dtype=np.intp)
+    if codes.size != X.shape[0]:
+        raise ValueError(f"group_codes has {codes.size} entries for {X.shape[0]} rows")
+    out = np.zeros((n_groups, X.shape[1]), dtype=np.float64)
+    scalar = np.zeros(n_groups, dtype=np.float64)
+    order = np.argsort(codes, kind="stable")
+    bounds = np.searchsorted(codes[order], np.arange(n_groups + 1))
+    for p in range(n_groups):
+        rows = order[bounds[p]:bounds[p + 1]]
+        n = rows.size
+        if n < 2:
+            continue
+        Xp = X[rows]
+        Xd = Xp.__class__((Xp.data.astype(np.float64), Xp.indices, Xp.indptr), shape=Xp.shape)
+        P = np.asarray(Xd.sum(axis=0), dtype=np.float64).ravel()
+        lib = np.asarray(Xd.sum(axis=1), dtype=np.float64).ravel()
+        tot = float(P.sum())
+        if tot <= 0.0:
+            continue
+        G = Xd.shape[1]
+        s1 = np.zeros(G, dtype=np.float64)
+        s2 = np.zeros(G, dtype=np.float64)
+        for s in range(0, n, chunk):
+            V = _loo_bulk(P, Xd[s:s + chunk].toarray(), tot - lib[s:s + chunk], bulk_target_sum)
+            s1 += V.sum(axis=0)
+            s2 += np.einsum("ij,ij->j", V, V)
+        dev = s2 - s1 ** 2 / n
+        out[p] = ((n - 1) / n) * dev
+        # BIT-IDENTICAL to `jackknife_correction`'s line, deliberately -- same expression, same
+        # order, same clamp. Do not rewrite either without rewriting both.
+        scalar[p] = max(((n - 1) / n) * float(dev.sum()), 0.0)
+    return out, scalar
+
+
+def signal_fraction_mask(means: np.ndarray, jk_gene: np.ndarray, control_row: int,
+                         eta: float) -> np.ndarray:
+    """``[P, G]`` bool: the genes whose real change clears the signal-fraction floor ``eta``.
+
+        EF_pg = (mu_p,g - mu_ctrl,g)^2                  apparent squared change, scored space
+        s_pg  = (EF_pg - q_pg - q_ctrl,g) / EF_pg        the share of it that is not noise
+        keep  <=>  s_pg >= eta   <=>   (1 - eta) * EF_pg >= q_pg + q_ctrl,g
+
+    The right-hand form is what is evaluated: it needs no division, so ``EF_pg == 0`` cannot
+    produce ``0/0``. What actually decides that gene is the separate ``ef > 0`` guard below,
+    which drops it UNCONDITIONALLY -- including the zero-noise case the inequality alone would
+    have kept. A gene has to have moved to be scored; see the guard's own comment for why.
+
+    ⚠️ REAL SIDE ONLY, and that is the whole point. ``means`` and ``jk_gene`` are the
+    reference's, so the scored gene set is a property of the panel that no submission can move
+    -- the same shape as #351's reference-only DE gene gate. A submission-dependent gene set
+    would hand back exactly the freedom the floor exists to remove.
+
+    Why a FLOOR and not a top-k: on a set S the layout exploit is worth
+    ``sum(C) / sum(EF - C - cc)``, so if every retained gene clears ``eta`` the exploit is
+    bounded by ``(1 - eta) / eta`` -- a design guarantee rather than a tuned constant. MEASURED
+    on official val A: eta=0 gives 0.2845 of the member's span (bound n/a) keeping 88.4% of the
+    panel's effect mass, eta=0.95 gives 0.0153 against a bound of 0.053 keeping 18.1%, against
+    0.9121 unrestricted. Ranking by the same quantity instead of thresholding it is DEGENERATE
+    (it selects genes where change and noise are both ~0: top-500 by ``EF/q`` keeps 0.1% of the
+    effect mass and collapses the per-gene denominator 400x), which is why this is a threshold.
+
+    The control's own term ``q_ctrl,g`` is included because it is in the denominator this floor
+    is protecting (``expr_distance_unbiased`` subtracts ``C_p`` AND ``C_ctrl``), so leaving it
+    out would let a gene qualify on a signal the scored quantity does not credit it for.
+    """
+    means = np.asarray(means, dtype=np.float64)
+    jk_gene = np.asarray(jk_gene, dtype=np.float64)
+    # The contract is `[P, G]`, and it has to be CHECKED rather than documented: matching 3-D
+    # inputs used to sail through the shape test and return a 3-D mask, and matching 1-D inputs
+    # failed later inside the indexing with a message about neither argument.
+    if means.ndim != 2:
+        raise ValueError(
+            f"signal_fraction_mask: means/jk_gene must be 2-D [P, G]; got {means.ndim}-D "
+            f"{means.shape}. One row per group -- the control's row included -- and one column "
+            "per gene."
+        )
+    if means.shape != jk_gene.shape:
+        raise ValueError(
+            f"signal_fraction_mask: means {means.shape} and jk_gene {jk_gene.shape} must be "
+            "the same [P, G]; they are the same panel's group means and per-gene jackknife."
+        )
+    # An integral row, not merely one that compares in range: a float index passed the range
+    # test and then failed inside the indexing, which read as a shape bug rather than a bad arg.
+    # ⚠️ `bool` SUBCLASSES `int`, so `isinstance(True, int)` is True and the obvious check lets
+    # a boolean through -- whereupon `means[True]` is BOOLEAN INDEXING, which adds an axis instead
+    # of selecting row 1. Reject it explicitly, before the integer test.
+    if isinstance(control_row, (bool, np.bool_)):
+        raise TypeError(
+            f"signal_fraction_mask: control_row must be an integer row index, got the boolean "
+            f"{control_row!r}. numpy would read that as a MASK, not as row "
+            f"{int(control_row)}."
+        )
+    if not isinstance(control_row, (int, np.integer)):
+        raise TypeError(
+            f"signal_fraction_mask: control_row must be an integer row index, got "
+            f"{type(control_row).__name__} ({control_row!r})."
+        )
+    if not (0 <= control_row < means.shape[0]):
+        raise ValueError(
+            f"signal_fraction_mask: control_row {control_row} is outside the {means.shape[0]} "
+            "group(s) supplied. The control's own row is needed for both the change and its "
+            "noise term."
+        )
+    # `eta` is a SHARE, so it lives in [0, 1). "Floor off" is `None` at the config, which means
+    # this function is not called at all -- deliberately, rather than being spelled here as an
+    # infinite sentinel: `(1 - (-inf)) * 0.0` is NaN, so an "off" sentinel would silently drop
+    # every gene whose change is exactly zero instead of keeping the whole panel.
+    eta = float(eta)
+    if not np.isfinite(eta) or not (0.0 <= eta < 1.0):
+        raise ValueError(
+            f"signal_fraction_mask: eta = {eta} is not a share in [0, 1). At 1.0 a gene would "
+            "have to carry a nonzero effect with EXACTLY zero sampling noise on both sides -- "
+            "admissible on paper, and measured 0 of 5,559,600 live pairs on val A -- so the "
+            "endpoint is excluded as policy rather than as an impossibility. The way to switch "
+            "the floor off is to not apply one."
+        )
+    ef = (means - means[control_row][None, :]) ** 2
+    noise = jk_gene + jk_gene[control_row][None, :]
+    # `ef > 0` is not implied by the inequality: a gene that is identically zero across the
+    # whole panel has `ef == noise == 0` and would pass `0 >= 0`. It carries no signal to
+    # protect and only inflates `|S_p|`, which is the per-row divisor BOTH legs of the derived
+    # metric divide by -- and `|S_p|` varies per row, so the inflation does not cancel in the
+    # ratio of sums. A gene has to have moved to be scored.
+    return (ef > 0.0) & ((1.0 - eta) * ef >= noise)
 
 
 def trace_sigma(counts: np.ndarray, sumsq: np.ndarray, means: np.ndarray) -> np.ndarray:
@@ -497,6 +693,78 @@ def correction_for(moments: GroupMoments, perts, means: np.ndarray, *,
             "them. Moments span ALL groups including the control."
         ) from None
     return moments.jk[rows]
+
+
+def correction_per_gene_for(moments: GroupMoments, perts, *, comparator: str,
+                            who: str) -> np.ndarray:
+    """``[len(perts), G]`` of ``jk_gene``, aligned to ``perts`` exactly as
+    :func:`correction_for` aligns the scalar ``jk``.
+
+    Same index-by-label route and the same "moments span ALL groups" contract, so a caller can
+    restrict a correction to a gene subset without re-deriving the alignment. Raises rather than
+    falling back: a signal-fraction floor scores a gene SUBSET, so a whole-panel correction
+    against a subset distance is not a degraded answer, it is a wrong one -- the numerator would
+    subtract a correction earned on 18,533 genes from a distance measured on a few hundred.
+    """
+    if comparator != "bulk_lognorm":
+        raise ValueError(
+            f"{who}: per-gene jackknife terms exist only on the bulk_lognorm (group-sum) path; "
+            f"this run's comparator is {comparator!r}."
+        )
+    if moments is None or moments.jk_gene is None:
+        raise ValueError(
+            f"{who}: these GroupMoments carry no per-gene jackknife (jk_gene is None). Building "
+            "it is gated on `per_gene_jk=True` at whichever reader produced them, so either they "
+            "came from a producer that was not asked for it -- rebuild them -- or from a driver "
+            "that cannot supply it at all. The in-memory, shard-streaming and cell-streaming "
+            "readers can; the PARTITIONED one cannot, and no rebuild will change that."
+        )
+    labels = [str(pp) for pp in moments.perts]
+    index = {lab: i for i, lab in enumerate(labels)}
+    # A dict keeps the LAST row for a repeated stringified label, so a duplicate -- or a
+    # `1` next to a `"1"` -- would align the per-gene correction to a different row than the
+    # scalar `correction_for` and the means use, and the numerator and denominator legs could
+    # then score the same row against different corrections. Refused here, once, because this
+    # is the one function both legs go through (codex review).
+    if len(index) != len(labels):
+        seen, dupes = set(), []
+        for lab in labels:
+            if lab in seen and lab not in dupes:
+                dupes.append(lab)
+            seen.add(lab)
+        raise ValueError(
+            f"{who}: these GroupMoments carry {len(labels)} groups but only {len(index)} "
+            f"distinct stringified labels (e.g. {dupes[:3]}). A signal-fraction floor aligns a "
+            "per-gene correction by label, so a duplicate would silently pair a row with "
+            "another row's noise."
+        )
+    # The REQUESTED labels have to be distinct too, not just the moments' own. With duplicates
+    # in a precomputed `real_bulk`, `_row_labels_from_index` raises on the collapsed index (the
+    # numerator) while this function happily hands the same correction row to both (the
+    # denominator) -- the numerator-raises/denominator-continues asymmetry again, one level out.
+    # Repository preprocessing emits unique canonical labels, so this rejects no legal panel
+    # (codex review round 2).
+    req = [str(pp) for pp in perts]
+    if len(set(req)) != len(req):
+        # Counter, not `req.count(lab)` per element: the comprehension form is O(n^2) purely to
+        # format a message, and `req` is one row per perturbation -- 20,000 on a full archive.
+        from collections import Counter
+        dupes = sorted(lab for lab, k in Counter(req).items() if k > 1)
+        raise ValueError(
+            f"{who}: the requested labels are not distinct once stringified (e.g. "
+            f"{dupes[:3]}). A signal-fraction floor aligns a per-gene correction by label, so a "
+            "duplicate would hand one row's noise to another row."
+        )
+    try:
+        # From `req`, not `perts`: `perts` may be a one-shot iterable and the duplicate check
+        # above has already consumed it (codex review round 3).
+        rows = np.asarray([index[lab] for lab in req], dtype=np.intp)
+    except KeyError as exc:
+        raise ValueError(
+            f"{who}: label {exc.args[0]!r} is absent from these GroupMoments; some driver "
+            "restricted them. Moments span ALL groups including the control."
+        ) from None
+    return moments.jk_gene[rows]
 
 
 def unbiased_sq_dist(pred_means, real_means, pred_trace_over_n, real_trace_over_n):

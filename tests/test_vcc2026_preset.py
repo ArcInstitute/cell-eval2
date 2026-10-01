@@ -42,8 +42,11 @@ def test_vcc2026_is_v2_plus_exactly_the_declared_deltas():
     assert differing == _DELTAS, (
         f"the competition preset drifted from v2: {differing}. Every field but `metrics` and "
         "`cache_strict` must match v2 exactly -- the competition scores v2's conventions, and "
-        "`cell_eval2_version` is compared exactly, so a v2 change is caught by the version "
-        "gate rather than needing a second frozen copy here."
+        "THIS assertion is what freezes the two declared deltas -- it is a config-vs-config "
+        "comparison, so nothing else catches v2 drifting while the competition preset stays put. "
+        "(Artifact compatibility is a separate guarantee, carried by `config_digest` peer-to-peer "
+        "and by `rule_digest`. It was the `cell_eval2_version` peer until #381, which is now "
+        "recorded and not compared on the bundle path.)"
     )
 
 

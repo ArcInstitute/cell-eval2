@@ -178,7 +178,7 @@ def test_cached_anchor_returns_a_validatable_bundle(synthetic_pair_with_effect, 
     expect = anchor_mod.AnchorExpect(
         fingerprint=meta["real_fingerprint"],
         semantic_identity=anchor_mod.semantic_identity(cfg, real, _names(cfg)),
-        version=meta["cell_eval2_version"], metrics=tuple(meta["metric_names"]))
+        metrics=tuple(meta["metric_names"]))
     # the bundle goes through the DOOR, in the shape the cache produces
     got, _m, source = anchor_mod.resolve_anchor(expect, cached=bundle)
     assert source == "cached"

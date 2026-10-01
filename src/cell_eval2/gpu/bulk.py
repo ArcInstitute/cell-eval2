@@ -130,6 +130,10 @@ class GroupedMeanAccumulator:
             if with_moments else None
         )
         self._jk_by_norm = None
+        #: `{norm: [n_groups, G]}` -- the jackknife's per-gene decomposition,
+        #: filled only when `jackknife(per_gene=True)` ran. A signal-fraction
+        #: floor scores a gene SUBSET, so it needs the terms, not just the sum.
+        self._jk_gene_by_norm = None
         self._max_row_total = None  # max raw per-cell total; set only when libs are computed
 
     def update(self, x_csr, group_idx):
@@ -291,10 +295,27 @@ class GroupedMeanAccumulator:
         counts = _host(self._counts)
         return {n: (counts.copy(), _host(self._sumsq[_moment_key(n)])) for n in self.norms}
 
-    def jackknife(self, make_blocks, *, chunk=512):
-        """Run the bulk-lognorm delete-one second pass over fresh ``(X, codes)`` blocks."""
+    def jackknife(self, make_blocks, *, chunk=512, per_gene=False):
+        """Run the bulk-lognorm delete-one second pass over fresh ``(X, codes)`` blocks.
+
+        ``per_gene`` additionally keeps ``q_pg = ((n-1)/n) * (s2 - s1^2/n)_g``, readable through
+        :meth:`jackknife_gene_by_norm`. The pass already holds ``s1``/``s2`` as ``[n_groups, G]``
+        and the scalar reduction below sums them away, so this costs one more array of a shape
+        that is already resident -- and NOT one more pass over the cells.
+        """
         if "bulk_lognorm" not in self.norms:
+            # `per_gene=False` here is the ordinary no-op: an accumulator without the comparator
+            # has no delete-one pass to run. `per_gene=True` is a REQUEST, and returning empty
+            # satisfies it silently -- the same fail-open the readers were fixed for, except this
+            # method is public and directly callable, so the readers' guard does not cover it.
+            if per_gene:
+                raise ValueError(
+                    "jackknife(per_gene=True) needs 'bulk_lognorm' in this accumulator's "
+                    f"normalizations -- the per-gene decomposition is of THAT comparator's "
+                    f"delete-one correction. Got {list(self.norms)!r}."
+                )
             self._jk_by_norm = {}
+            self._jk_gene_by_norm = {}
             return
         if self._sumsq is None:
             raise ValueError("bulk_lognorm jackknife requires with_moments=True")
@@ -348,6 +369,19 @@ class GroupedMeanAccumulator:
         )
         host = out.get() if hasattr(out, "get") else np.asarray(out)
         self._jk_by_norm = {"bulk_lognorm": np.asarray(host, dtype=np.float64)}
+        if per_gene:
+            # The SCALAR above is untouched -- same expression, same order, same clamp -- so a
+            # run that asks for the terms reports the identical `jk`. The terms are NOT clamped
+            # per gene: a coordinate may be negative at machine precision and clamping each
+            # would bias every subset sum upward. The clamp belongs on the restricted sum, which
+            # is the floor policy's job and is NOT on this branch -- these are the primitives
+            # only. `jackknife_correction` clamps the whole-panel sum it returns.
+            gene = xp.zeros((self.n_groups, s2.shape[1]), dtype=xp.float64)
+            gene[ok] = ((n[ok] - 1) / n[ok])[:, None] * (s2[ok] - s1[ok] ** 2 / n[ok][:, None])
+            g_host = gene.get() if hasattr(gene, "get") else np.asarray(gene)
+            self._jk_gene_by_norm = {"bulk_lognorm": np.asarray(g_host, dtype=np.float64)}
+        else:
+            self._jk_gene_by_norm = {}
 
     def jackknife_by_norm(self):
         """``{norm: jk[n_groups] fp64}`` or ``None`` when no second pass was run.
@@ -358,6 +392,11 @@ class GroupedMeanAccumulator:
         ``finalize()``.
         """
         return self._jk_by_norm
+
+    def jackknife_gene_by_norm(self):
+        """``{norm: q[n_groups, G] fp64}``, ``{}`` if the pass ran without ``per_gene``, or
+        ``None`` if no second pass ran at all -- mirroring :meth:`jackknife_by_norm`."""
+        return self._jk_gene_by_norm
 
     @property
     def max_row_total(self):

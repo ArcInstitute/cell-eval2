@@ -321,7 +321,7 @@ def _warn_mixed_library_scale(cfg, effective_types: dict[str, str]) -> None:
 
     where ``S_c`` is whatever library scale the prediction's author normalized cell ``c`` to.
     MEASURED on a real VCC Test submission (132,870 predicted cells;
-    internal:docs/validation/2026-07-30-generic-response-baseline-real-data.md): at the v2 default
+    internal:docs/internal/validation/2026-07-30-generic-response-baseline-real-data.md): at the v2 default
     ``target_sum=1e6`` the two sides sit **14.9x-25.2x apart**, median 18.4x. ``target_sum=None``
     resolves to the reference control pool's median and removes the bulk of it -- 0.82x-1.37x,
     median 1.00x -- but not exactly, because the submission is not normalized to one constant.
@@ -951,6 +951,22 @@ def _pred_de_input(pred_ad, real_ad, *, cfg):
         real_ctrl = _norm.to_normalization(real_ctrl, real_eff, pred_eff, target_sum=cfg.target_sum)
     if external_ref:
         return pred_de_targets, real_ctrl  # (full pred targets, separate real control pool) — gpudge #67
+    # Refuse a duplicated gene axis HERE, before the concat, with one message. anndata 0.13.2
+    # rejected it from inside ad.concat's reindex as ValueError("cannot reindex on an axis with
+    # duplicate labels"); anndata 0.13.3 raises pandas.errors.InvalidIndexError, a plain Exception
+    # (measured with pandas 3.0.5 under both, so the trigger is the anndata release, not pandas 3).
+    # Without this guard the error type -- and whether a caller's `except ValueError` catches it --
+    # would depend on which anndata resolved. #218 pins this route as the one that refuses a
+    # duplicated key.
+    for label, a in (("pred", pred_de_targets), ("real control", real_ctrl)):
+        names = a.var_names
+        if not names.is_unique:
+            dups = names[names.duplicated()].unique().tolist()
+            shown = ", ".join(map(str, dups[:5])) + (", ..." if len(dups) > 5 else "")
+            raise ValueError(
+                f"{label} var_names contain duplicate labels ({shown}); cannot fold the real "
+                "control into the predictions for DE -- deduplicate the gene axis first (#218)"
+            )
     return ad.concat([pred_de_targets, real_ctrl], join="inner", merge="first"), None  # CPU: concat
 
 

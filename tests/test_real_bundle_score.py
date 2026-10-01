@@ -30,7 +30,7 @@ class _Submission:
 def submission(counts_bundle_inputs, tmp_path):
     """A `run`-shaped submission: the aggregate CSV, its run_meta dict, and that meta on disk.
 
-    Built under the SAME config as the bundle, because `check_submission` compares nine peer
+    Built under the SAME config as the bundle, because `check_submission` compares eight peer
     fields (plus a one-sided check on `de_pred_fingerprint`) -- a submission produced under a
     different config is exactly what the gate exists to refuse, so a fixture that produced one
     could only ever test the failure path.
@@ -66,7 +66,7 @@ def diagnostic_bundle(counts_bundle_inputs, tmp_path):
     `config_digest` covers the resolved metric list, so changing metrics would make the
     submission gate refuse the bundle instead of exercising diagnostic enrolment. With
     `base_seed=123`, `rule_digest` is None and `rule_mismatches` names `base_seed` and
-    `derived_seeds`, while all nine submission peers (and the one-sided `de_pred_fingerprint`
+    `derived_seeds`, while all eight submission peers (and the one-sided `de_pred_fingerprint`
     check) still agree.
     """
     baseline_pred, real, _submission_pred = counts_bundle_inputs
@@ -136,6 +136,7 @@ def test_a_diagnostic_bundle_reports_but_does_not_enrol(diagnostic_bundle, submi
     assert out.filter(pl.col("metric") == "avg_score")["from_baseline"].item() is not None
     assert out.filter(pl.col("metric") == "avg_score")["from_replicate"].item() is not None
     assert "diagnostic" in caplog.text
+    assert "no cross-release comparability guarantee" in caplog.text
 
 
 def test_a_STALE_rule_digest_is_fatal(competition_bundle, submission, tmp_path):
@@ -151,7 +152,7 @@ def test_a_STALE_rule_digest_is_fatal(competition_bundle, submission, tmp_path):
 
 
 @pytest.mark.parametrize("field,bad", [
-    ("config_digest", "deadbeef"), ("cell_eval2_version", "0.0.1"),
+    ("config_digest", "deadbeef"),
     ("comparator", "lognorm"), ("source_fingerprint", "deadbeef"),
     ("resolved_de_backend", "nonesuch"),
 ])
@@ -162,6 +163,38 @@ def test_a_submission_that_disagrees_with_the_bundle_is_REFUSED(
     with pytest.raises(ValueError, match=field):
         score_metrics(submission.agg, real_bundle=competition_bundle.root,
                       user_meta={**submission.meta, field: bad})
+
+
+def test_a_version_MISMATCH_is_no_longer_a_peer_disagreement(competition_bundle, submission):
+    """#381. A release that moves no digest must not invalidate a bundle.
+
+    `cell_eval2_version` is RECORDED in the manifest and never compared: the semantics gate is
+    `rule_digest`, which carries the hand-bumped `rule_version`, and
+    `test_a_STALE_rule_digest_is_fatal` is what guards it. Measured on the official bundles:
+    `-r3` (0.15.0) and `-r4` (0.16.0) carry the same `rule_digest` and the same `config_digest`,
+    with byte-identical anchor parquets, so the version was the only thing between them.
+    """
+    waivers = check_submission(competition_bundle.manifest,
+                              {**submission.meta, "cell_eval2_version": "99.99.99"})
+    assert waivers == []
+    # RECORDED, not dropped -- a reader must still be able to ask what built the bundle.
+    assert competition_bundle.manifest["cell_eval2_version"]
+
+
+def test_a_version_MISMATCH_still_ENROLS_end_to_end(competition_bundle, submission):
+    """The pair Task 1 could not test: `score_metrics` crosses BOTH former version gates.
+
+    ⚠️ `from_replicate is not None` and a stamped `real_bundle_id` do NOT prove enrolment -- a
+    DIAGNOSTIC bundle reports both. The enrolment signal is `avg_score.from_baseline` being
+    NULLED, because #276 part C replaces it with `from_replicate`. Asserting only the first two
+    would let an accidental diagnostic downgrade make this test pass (Copilot, PR #382).
+    """
+    out = score_metrics(submission.agg, real_bundle=competition_bundle.root,
+                        user_meta={**submission.meta, "cell_eval2_version": "99.99.99"})
+    row = out.filter(pl.col("metric") == "avg_score")
+    assert row["from_replicate"].item() is not None
+    assert row["from_baseline"].item() is None            # ENROLLED, not downgraded
+    assert out["real_bundle_id"].to_list()[0] == competition_bundle.manifest["real_bundle_id"]
 
 
 def test_the_error_names_EVERY_disagreeing_field(competition_bundle, submission):
@@ -646,5 +679,12 @@ def test_the_CLI_refuses_every_conflicting_flag(competition_bundle, submission, 
             "--real-bundle", competition_bundle.root, flag]
     if val is not None:
         argv.append(val)
-    with pytest.raises(SystemExit, match="real-bundle"):
+    with pytest.raises(SystemExit, match="real-bundle") as e:
         main(argv)
+    # ⚠️ `--allow-config-mismatch` additionally has to name the SAME-BUNDLE remedy. Matching only
+    # "real-bundle" left the whole guidance deletable with the suite green (codex checkpoint 2):
+    # a submission refused on the one-sided `de_pred_fingerprint` check is NOT helped by
+    # --baseline-agg/--anchor, which is a different scoring path, and `score_metrics` accepts
+    # `diagnostic_supplied_de_pred` on THIS bundle (Copilot, PR #382).
+    if flag == "--allow-config-mismatch":
+        assert "--diagnostic-supplied-de-pred" in str(e.value)

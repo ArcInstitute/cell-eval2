@@ -3,7 +3,7 @@
 Separates three facts that ``MetricSpec.best_value`` used to carry in one token: the
 normalization anchor (mathematics), enrolment in ``avg_score`` (policy), and the absence
 of a constant anchor (a missing formula). See
-``internal:docs/superpowers/specs/2026-08-01-metric-scoring-policy-design.md``.
+``internal:docs/internal/superpowers/specs/2026-08-01-metric-scoring-policy-design.md``.
 
 Deliberately free of any catalog import so the engine stays pure and both ``score.py``
 and ``catalog.py`` can depend on it.

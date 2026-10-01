@@ -174,6 +174,20 @@ print(res.overall)     # per_pert / per_context / overall frames
 - Materializes perturbation-complete batches under an explicit memory budget.
 - The control label comes from a uniform `obs.control_value` column when the archive has one,
   otherwise from `EvalConfig.control` — so set it explicitly if your archive lacks that column.
+- Pass `outdir=...` to also write the `ScoreResult` frames there (`per_pert.parquet`,
+  `per_context.parquet`, `overall.parquet`). Add **`write_de=True`** to additionally emit the raw
+  gene-level DE tables `de_real.parquet` + `de_pred.parquet` — the same artifact the in-memory
+  path writes under `--write-degenes` (via the same writer, so the schema is identical). Off by
+  default; requires `outdir` and at least one DE metric in the selection.
+
+  ```python
+  score_cellstream(
+      "pred.csad", "real.csad",
+      config=EvalConfig(device="cuda", pert_col="target_gene"),
+      mem_budget=MemBudget(host_bytes=64 * 2**30, gpu_bytes=40 * 2**30),
+      outdir="results/", write_de=True,   # -> results/de_{real,pred}.parquet
+  )
+  ```
 
 ## Caching
 
