@@ -47,9 +47,13 @@ def _exclude_own_gene(df: pl.DataFrame, prepared: PreparedDE, *,
     res = prepared.target_resolution
     logger.info(
         "%s: excluded the perturbed gene's own row from the %s side -- %d row(s) removed of "
-        "%d, over %d/%d targets resolved to a measured gene (issue #172).",
+        "%d, over %d/%d targets resolved to a measured gene (issue #172)%s.",
         who, side, df.height - out.height, df.height, res.n_resolved,
         res.n_targets or len(prepared.perturbations),
+        # #397: without it a panel of drugs reads "0/90 resolved", which is what a construct-ID
+        # mismatch looks like -- but the gate above has just passed it.
+        (f"; {res.n_declared} declared to have no target gene (#397)"
+         if res.n_declared else ""),
     )
     return out
 
@@ -809,13 +813,15 @@ def _de_auc(prepared: PreparedDE, method: str, *,
             auc_pval_floor_value: float = 1e-10) -> dict[str, float]:
     """Per-perturbation PR/ROC AUC for recovering real-significant genes. Label =
     (real p_adj < T). Pred score = -log10(floor(pred p_adj)), where the floor is:
+      - "preserve":     float64, floor at nextafter(0, 1) -- elementwise; what partitioned
+                        scoring computes for min_nonzero (_require_partition_config)
       - "clip":         clip(value, 1.0)         -- ties zeros + sub-value (legacy cev2)
       - "replace_zero": replace 0 -> value       -- only exact zeros (cell-eval exact)
       - "min_nonzero":  replace 0 -> smallest nonzero pred p (order-consistent; v2 default)
     NaN AUC when a target has no rows or single-class labels."""
-    if auc_pval_floor not in ("clip", "replace_zero", "min_nonzero"):
+    if auc_pval_floor not in ("preserve", "clip", "replace_zero", "min_nonzero"):
         raise ValueError(f"auc_pval_floor must be one of "
-                         f"('clip','replace_zero','min_nonzero'), got {auc_pval_floor!r}")
+                         f"('preserve','clip','replace_zero','min_nonzero'), got {auc_pval_floor!r}")
     if not (0.0 < auc_pval_floor_value <= 1.0):
         raise ValueError(f"auc_pval_floor_value must be in (0, 1], "
                          f"got {auc_pval_floor_value!r}")
@@ -838,7 +844,12 @@ def _de_auc(prepared: PreparedDE, method: str, *,
         .with_columns(pl.col("p_adj").fill_nan(1.0).fill_null(1.0).alias("p_adj"))
     )
     fv = auc_pval_floor_value
-    if auc_pval_floor == "clip":
+    if auc_pval_floor == "preserve":
+        # Keep tiny positive p-values ordered. Exact zeros get the smallest positive
+        # float64, independently of other genes or streaming partitions; no float32
+        # round-trip or data-dependent floor can demote them below weaker evidence.
+        q = pl.col("p_adj").cast(pl.Float64).clip(lower_bound=np.nextafter(0.0, 1.0))
+    elif auc_pval_floor == "clip":
         q = pl.col("p_adj").clip(fv, 1.0)
     elif auc_pval_floor == "replace_zero":
         # cell-eval stores DE numerics as Float32 (DEResults), so pred p < ~1.4e-45 underflow

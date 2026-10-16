@@ -395,7 +395,7 @@ def test_compute_metrics_closes_backed_handles_on_error(tmp_path, synthetic_pair
     assert str(pp) in closed and str(rp) in closed  # finally closes handles despite the error
 
 
-def test_auc_floor_threaded_v1_vs_v2(synthetic_pair, synthetic_counts_pair):
+def test_auc_floor_threaded_v1_vs_v2(synthetic_pair, synthetic_counts_pair, monkeypatch):
     # Same DE tables drive both runs; only the version-scoped auc_pval_floor differs
     # (v1=replace_zero, v2=min_nonzero). GENE1's pred has an exact-0 real-sig gene whose
     # ranking flips between strategies -> roc_auc 0.75 (v1) vs 1.0 (v2). GENE2/GENE3 keep
@@ -420,6 +420,14 @@ def test_auc_floor_threaded_v1_vs_v2(synthetic_pair, synthetic_counts_pair):
                       (pl.col("metric").is_in(["roc_auc", "de_wilcoxon_roc_auc"])))["value"][0]
 
     pred_ad_v2, real_ad_v2 = synthetic_counts_pair   # counts; v2 default
+    # #391's gate would leave GENE1 -- two reference-significant genes, below the floor of 10 --
+    # unscored under v2. The floor is not what this test is about, so lower it for this metric.
+    import dataclasses
+
+    from cell_eval2.catalog import CATALOG
+    from cell_eval2.real_gate import RealGate
+    monkeypatch.setitem(CATALOG, "de_wilcoxon_roc_auc", dataclasses.replace(
+        CATALOG["de_wilcoxon_roc_auc"], real_gate=RealGate("two_class", min_gate_size=2)))
     cfg_v2 = EvalConfig.v2()
     cfg_v2.metrics = ["roc_auc"]
     df_v2 = compute_metrics(pred_ad_v2, real_ad_v2, config=cfg_v2, de_pred=pred, de_real=real)

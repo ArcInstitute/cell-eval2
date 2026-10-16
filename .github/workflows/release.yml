@@ -35,6 +35,22 @@ permissions:
 jobs:
   publish:
     name: build, verify, publish
+    # ⚠️ ONE release.yml SERVES TWO REPOS. The public tree is cut from a private source
+    # repository and this file ships verbatim, so it is live there too -- where a GitHub Release
+    # must start nothing. The job therefore runs only in the repository PyPI's publisher names and
+    # is SKIPPED everywhere else: in the private source (`ArcInstitute/cell_eval2`, underscore)
+    # and in any fork, for a release and for a manual dry run alike. In the private source a dry
+    # run would only rehearse the wrong artifact anyway: its sdist would carry the private tree,
+    # not the one that ships. It is the JOB that is guarded, not just the upload step, so
+    # `environment: pypi` is not created there either: measured, a skipped dry run in the private
+    # repository left no `pypi` environment and no deployment behind.
+    # ⚠️ THE FAILURE IS SILENT. A name that does not match skips the job instead of failing it --
+    # the run concludes `skipped`, not `failure`, so nothing turns red -- and the Release looks
+    # done until someone checks PyPI. A rename, a transfer or a cut into another repository must
+    # change this line together with the PyPI publisher, and a workflow_dispatch dry run there
+    # must show the job RUNNING, not skipped, before the Release. `==` ignores case; the hyphen is
+    # the one character that tells the two names apart.
+    if: github.repository == 'ArcInstitute/cell-eval2'
     runs-on: ubuntu-latest
     # Must match the environment named in the PyPI publisher config. It is also where a required
     # reviewer hangs, so a release can be gated on a human even when a tag triggered it.

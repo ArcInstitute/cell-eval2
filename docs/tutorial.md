@@ -672,9 +672,13 @@ Neither path has a `cell-eval2` subcommand — drive both from the Python API ab
 scorer — see the README's *Out-of-core scoring* section) takes `outdir=...` to write its
 `ScoreResult` frames, and `write_de=True` to *additionally* emit the gene-level DE tables
 `de_real.parquet` + `de_pred.parquet` — the same pre-rank/threshold artifact the in-memory path
-writes under `--write-degenes`, through the same `run._write_de_tables` writer, so the schema is
-identical across paths. It is off by default, requires `outdir`, and needs at least one DE metric
-in the selection (otherwise there is no `de_pred` to write and it raises):
+writes under `--write-degenes` (same columns for the same DE backend). Both are written through
+`de_export`'s pinned zstd-3 writer one row group at a time, and all five files are published
+together, with rollback on error — [`docs/de_tables.md`](de_tables.md) has the exact contract. It
+is off by default, requires `outdir`, and needs at least one DE metric in the selection (checked
+before any archive is opened). Like every `score_cellstream` run, the resolved selection must not
+contain any moments metric, so `"full"` (the default), `"anndata"` and `"vcc2026"` cannot be used
+(see the README's *Out-of-core scoring*):
 
 ```python
 from cell_eval2 import score_cellstream, MemBudget
@@ -682,7 +686,7 @@ from cell_eval2.config import EvalConfig
 
 score_cellstream(
     "pred.csad", "real.csad",
-    config=EvalConfig(device="cuda", pert_col="target_gene"),   # DE-at-scale is GPU-only
+    config=EvalConfig(metrics="de", device="cuda", pert_col="target_gene"),   # DE-at-scale is GPU-only
     mem_budget=MemBudget(host_bytes=64 * 2**30, gpu_bytes=40 * 2**30),
     outdir="results/", write_de=True,   # -> results/de_real.parquet, results/de_pred.parquet
 )

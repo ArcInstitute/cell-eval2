@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from dataclasses import replace
 
 import polars as pl
@@ -11,9 +12,9 @@ import yaml
 
 from .baseline import _degenerate_metrics, build_run_meta, write_json_meta
 from .ceiling import compute_ceiling
-from .config import EvalConfig
-from .run import (aggregate_metrics_wide, compute_metrics, metric_agg, metric_cohorts,
-                  metric_output_names, precompute_cache)
+from .config import NO_TARGET_GENE_WILDCARD, EvalConfig
+from .run import (_cell_archive_pert_col, aggregate_metrics_wide, compute_metrics, metric_agg,
+                  metric_cohorts, metric_output_names, precompute_cache)
 from .score import score_metrics
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,14 @@ def _add_config_flags(p: argparse.ArgumentParser) -> None:
                    help="override any config field by dotted path, repeatable "
                         "(e.g. --set de.min_abs_log2fc=0.25). VALUE is parsed as YAML; "
                         "applied after --config and the explicit flags.")
+    # #397. A flag rather than a `--set`: `target_gene_map` is a dict, and `--set` refuses to
+    # overwrite one that a --config or --preset already holds.
+    p.add_argument("--no-target-genes", action="store_true", default=False,
+                   help="the perturbations have no target gene (drug doses, added "
+                        "cytokines): adds {'*': None} to target_gene_map, so no label is "
+                        "matched to a gene by name and nothing is excluded; a label's own "
+                        "map entry still wins. Applied last. A set map takes the run off the "
+                        "competition rule.")
 
 
 def _apply_set_overrides(cfg: EvalConfig, overrides: list[str]) -> EvalConfig:
@@ -113,6 +122,14 @@ def _build_cfg(args) -> EvalConfig:
     set_overrides = getattr(args, "set_overrides", None)
     if set_overrides:
         cfg = _apply_set_overrides(cfg, set_overrides)
+    if getattr(args, "no_target_genes", False):
+        # MERGED into the map the config already holds, not a replacement: the flag sets the
+        # wildcard, and a label with an entry of its own keeps it (`config.target_gene_entry`).
+        try:
+            cfg = replace(cfg, target_gene_map={**(cfg.target_gene_map or {}),
+                                                NO_TARGET_GENE_WILDCARD: None})
+        except ValueError as e:      # e.g. the config's map has a non-string label
+            raise SystemExit(f"--no-target-genes: {e}") from None
     return cfg
 
 
@@ -463,6 +480,23 @@ def _build_parser() -> argparse.ArgumentParser:
                          "those metrics dropped from avg_score, provided at least one "
                          "scoreable metric remains")
 
+    cache = sub.add_parser(
+        "cache", help="ground-truth DEG cache maintenance: inspect one entry's on-disk "
+                      "validity, or self-check a cache root's filesystem primitives")
+    cache_sub = cache.add_subparsers(dest="cache_command", required=True)
+    cache_inspect = cache_sub.add_parser(
+        "inspect", help="validate one ground-truth cache entry (by 64-hex cache id, or the "
+                        "entry directory path) and print its manifest summary as JSON")
+    cache_inspect.add_argument("entry_or_id",
+                               help="64-hex cache id (resolved under --root), or an entry "
+                                    "directory path")
+    cache_inspect.add_argument("--root", required=True, help="the ground-truth cache root")
+    cache_doctor = cache_sub.add_parser(
+        "doctor", help="self-check a ground-truth cache root: flock exclusion, the parquet "
+                       "zstd round-trip, and a same-filesystem atomic rename. Computes no "
+                       "DE. Prints a JSON report")
+    cache_doctor.add_argument("root", help="the ground-truth cache root to check")
+
     return parser
 
 
@@ -539,6 +573,9 @@ def main(argv: list[str] | None = None) -> None:
             # config fails before the expensive work. run_meta.json mirrors the baseline
             # stamp's RESOLVED identity -- without it `score` has nothing on the user side to
             # compare against, and the stamped backend/device/reference are decorative.
+            # A cell-layout pair scored on cell metrics alone may adopt the archives' grouping
+            # column; resolve it FIRST, so provenance reads the column the scoring does.
+            cfg = _cell_archive_pert_col(args.adata_pred, args.adata_real, cfg)
             run_meta = build_run_meta(cfg, args.adata_real, args.adata_pred,
                                       de_real=args.de_real, de_pred=args.de_pred)
             df = compute_metrics(args.adata_pred, args.adata_real, config=cfg,
@@ -834,3 +871,16 @@ def main(argv: list[str] | None = None) -> None:
             print(args.output)
         else:
             print(out)
+    elif args.command == "cache":
+        if args.cache_command == "inspect":
+            from .ground_truth_cache import inspect_entry
+
+            result = inspect_entry(args.entry_or_id, root=args.root)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            sys.exit(0 if result["valid"] else 2)
+        elif args.cache_command == "doctor":
+            from .ground_truth_cache import doctor
+
+            report = doctor(args.root)
+            print(json.dumps(report, indent=2))
+            sys.exit(0 if report["ok"] else 1)

@@ -40,6 +40,10 @@ def _spec_fingerprint(spec):
     golden green. `best_value` is KEPT rather than replaced: it is derived, so it adds no
     coverage, but removing it would renumber every field index the comments below cite.
 
+    ``spec.real_gate`` (#391) is appended AFTER it, so no field index cited below moves: which
+    perturbations the reference lets a metric score is as much a part of its identity as how it
+    scores, and a gate dropped or retuned in the catalog must turn this golden red.
+
     ⚠️ DECLARED, not resolved. `dataclasses.astuple` records a `None` `penalty_cap` as
     `None`, not as `DEFAULT_PENALTY_CAP`. That is the right scope for a gate about
     deliberate CATALOG edits; a change to a module-level default is covered instead by
@@ -50,66 +54,67 @@ def _spec_fingerprint(spec):
     return (spec.name, spec.v1_name, spec.best_value, spec.worst_value, tuple(spec.profiles),
             tuple(spec.aliases), spec.kind, spec.normalization, spec.agg, spec.v1_available,
             fn.__module__, fn.__qualname__, args, kwargs, spec.needs_moments,
-            dataclasses.astuple(spec.scoring))
+            dataclasses.astuple(spec.scoring),
+            None if spec.real_gate is None else dataclasses.astuple(spec.real_gate))
 
 
 # Ordered golden snapshot of the de_wilcoxon_* family. Keep every spec exact and ordered so
 # additions are deliberate and the deseq2 mirror remains mechanically faithful.
 GOLDEN_WILCOXON = [
-    ('de_wilcoxon_overlap', 'overlap_at_N', 'one', None, ('full', 'minimal', 'de', 'vcc'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', None), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_overlap_top50', 'overlap_at_50', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 50), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_overlap_top100', 'overlap_at_100', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 100), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_overlap_top200', 'overlap_at_200', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 200), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_overlap_top500', 'overlap_at_500', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 500), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_precision', 'precision_at_N', 'one', None, ('full', 'minimal', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', None), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_precision_top50', 'precision_at_50', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 50), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_precision_top100', 'precision_at_100', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 100), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_precision_top200', 'precision_at_200', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 200), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_precision_top500', 'precision_at_500', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 500), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_nsig_counts_real', 'de_nsig_counts_real', 'none', None, ('full', 'minimal', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_nsig_counts', (), (('side', 'real'),), False, (False, None, None, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_nsig_counts_pred', 'de_nsig_counts_pred', 'none', None, ('full', 'minimal', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_nsig_counts', (), (('side', 'pred'),), False, (False, None, None, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_nsig_spearman', 'de_spearman_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_nsig_spearman', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_sig_recall', 'de_sig_genes_recall', 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_sig_recall', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_direction_match', 'de_direction_match', 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_direction_match', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_model_direction_match', 'de_model_direction_match', 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_model_direction_match', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_lfc_spearman', 'de_spearman_lfc_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_lfc_spearman', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_lfc_spearman_pos', 'de_spearman_pos_lfc_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_lfc_spearman', (), (('lfc_direction', 'pos'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_lfc_spearman_neg', 'de_spearman_neg_lfc_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_lfc_spearman', (), (('lfc_direction', 'neg'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
+    ('de_wilcoxon_overlap', 'overlap_at_N', 'one', None, ('full', 'minimal', 'de', 'vcc'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', None), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_overlap_top50', 'overlap_at_50', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 50), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_overlap_top100', 'overlap_at_100', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 100), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_overlap_top200', 'overlap_at_200', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 200), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_overlap_top500', 'overlap_at_500', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 500), ('metric', 'overlap')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_precision', 'precision_at_N', 'one', None, ('full', 'minimal', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', None), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_precision_top50', 'precision_at_50', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 50), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_precision_top100', 'precision_at_100', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 100), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_precision_top200', 'precision_at_200', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 200), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_precision_top500', 'precision_at_500', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_overlap', (), (('k', 500), ('metric', 'precision')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_nsig_counts_real', 'de_nsig_counts_real', 'none', None, ('full', 'minimal', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_nsig_counts', (), (('side', 'real'),), False, (False, None, None, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_nsig_counts_pred', 'de_nsig_counts_pred', 'none', None, ('full', 'minimal', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_nsig_counts', (), (('side', 'pred'),), False, (False, None, None, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_nsig_spearman', 'de_spearman_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_nsig_spearman', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('count_corr', 10, 'all')),
+    ('de_wilcoxon_sig_recall', 'de_sig_genes_recall', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_sig_recall', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('sig_set', 10, 'all')),
+    ('de_wilcoxon_direction_match', 'de_direction_match', 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_direction_match', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('sig_lfc', 10, 'all')),
+    ('de_wilcoxon_model_direction_match', 'de_model_direction_match', 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_model_direction_match', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('lfc_present', 10, 'all')),
+    ('de_wilcoxon_lfc_spearman', 'de_spearman_lfc_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_lfc_spearman', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('rank_corr', 10, 'all')),
+    ('de_wilcoxon_lfc_spearman_pos', 'de_spearman_pos_lfc_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_lfc_spearman', (), (('lfc_direction', 'pos'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('rank_corr', 10, 'pos')),
+    ('de_wilcoxon_lfc_spearman_neg', 'de_spearman_neg_lfc_sig', 'one', -1.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_lfc_spearman', (), (('lfc_direction', 'neg'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('rank_corr', 10, 'neg')),
     # #208. best_value (field 2) is 'zero': scored + direction='lower' maps to the old
     # error token. v1_available (field 9) is False -- v2-native, no cell-eval equivalent.
-    ('de_wilcoxon_lfc_nmae', None, 'zero', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_lfc_nmae', (), (), False, (True, 'lower', 0.0, 'none', None, None, -6.0, None, False, None)),
-    ('de_wilcoxon_pr_auc', 'pr_auc', 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_pr_auc', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_roc_auc', 'roc_auc', 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_roc_auc', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
+    ('de_wilcoxon_lfc_nmae', None, 'zero', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_lfc_nmae', (), (), False, (True, 'lower', 0.0, 'none', None, None, -6.0, None, False, None), None),
+    ('de_wilcoxon_pr_auc', 'pr_auc', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_pr_auc', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('two_class', 10, 'all')),
+    ('de_wilcoxon_roc_auc', 'roc_auc', 'one', None, ('full', 'de'), (), 'de', None, 'mean', True, 'cell_eval2.metrics.de', 'de_roc_auc', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('two_class', 10, 'all')),
     # v1_available (field 9) is False for all seven: they are v2-native (v1_name=None), and
     # v1 availability is now derived from v1_name rather than hand-flagged.
-    ('de_wilcoxon_overlap_adjusted', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_overlap_adjusted', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_precision_adjusted', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_agreement', (), (('measure', 'markedness'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_sig_recall_adjusted', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_agreement', (), (('measure', 'informedness'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_sig_mcc', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_agreement', (), (('measure', 'mcc'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_direction_precision', None, 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_precision', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_direction_sensitivity', None, 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_sensitivity', (), (('universe', 'adjudicated'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
+    ('de_wilcoxon_overlap_adjusted', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_overlap_adjusted', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('ranked_universe', 10, 'all')),
+    ('de_wilcoxon_precision_adjusted', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_agreement', (), (('measure', 'markedness'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_sig_recall_adjusted', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_agreement', (), (('measure', 'informedness'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('sig_universe', 10, 'all')),
+    ('de_wilcoxon_sig_mcc', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_agreement', (), (('measure', 'mcc'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('sig_universe', 10, 'all')),
+    ('de_wilcoxon_direction_precision', None, 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_precision', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('adjudicable', 10, 'all')),
+    ('de_wilcoxon_direction_sensitivity', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_sensitivity', (), (('universe', 'adjudicated'),), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), ('sig_set', 10, 'all')),
     # best_value (field 2) is 'one' for all twelve now: every directional metric is scored,
     # and the derived token maps scored+higher to 'one'. Only the two nsig counts above keep
     # 'none', because they are the only entries with no direction at all.
-    ('de_wilcoxon_direction_sensitivity_universe', None, 'one', 0.0, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_sensitivity', (), (('universe', 'all'),), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None)),
-    ('de_wilcoxon_direction_fidelity', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_direction_fidelity_raw', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity_raw', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_direction_coverage', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_coverage', (), (), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None)),
-    ('de_wilcoxon_direction_yield', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_yield', (), (), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, True, None)),
-    ('de_wilcoxon_direction_yield_raw', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_yield_raw', (), (), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None)),
-    ('de_wilcoxon_direction_fidelity_yield', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity_yield', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_direction_fidelity_yield_raw', None, 'one', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity_yield_raw', (), (), False, (True, 'higher', 1.0, 'none', None, None, None, None, False, 0.0)),
-    ('de_wilcoxon_direction_reach', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', True), ('universe', 'adjudicated')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None)),
-    ('de_wilcoxon_direction_reach_raw', None, 'one', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', False), ('universe', 'adjudicated')), False, (True, 'higher', 1.0, 'none', None, None, None, None, False, 0.0)),
-    ('de_wilcoxon_direction_reach_unbounded', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', True), ('universe', 'all')), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None)),
-    ('de_wilcoxon_direction_reach_unbounded_raw', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', False), ('universe', 'all')), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None)),
+    ('de_wilcoxon_direction_sensitivity_universe', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_sensitivity', (), (('universe', 'all'),), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None), ('sig_set', 10, 'all')),
+    ('de_wilcoxon_direction_fidelity', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_direction_fidelity_raw', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity_raw', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_direction_coverage', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_coverage', (), (), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None), None),
+    ('de_wilcoxon_direction_yield', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_yield', (), (), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, True, None), None),
+    ('de_wilcoxon_direction_yield_raw', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_yield_raw', (), (), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None), None),
+    ('de_wilcoxon_direction_fidelity_yield', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity_yield', (), (), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_direction_fidelity_yield_raw', None, 'one', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_fidelity_yield_raw', (), (), False, (True, 'higher', 1.0, 'none', None, None, None, None, False, 0.0), None),
+    ('de_wilcoxon_direction_reach', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', True), ('universe', 'adjudicated')), False, (True, 'higher', 1.0, 'none', None, None, 0.0, None, False, None), None),
+    ('de_wilcoxon_direction_reach_raw', None, 'one', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', False), ('universe', 'adjudicated')), False, (True, 'higher', 1.0, 'none', None, None, None, None, False, 0.0), None),
+    ('de_wilcoxon_direction_reach_unbounded', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', True), ('universe', 'all')), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None), None),
+    ('de_wilcoxon_direction_reach_unbounded_raw', None, 'one', None, ('full', 'de'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.direction', 'de_direction_reach', (), (('corrected', False), ('universe', 'all')), False, (True, 'higher', None, 'none', None, None, -2.0, 2.0, False, None), None),
     # Every row above carries agg='mean' (#231): the catalog has exactly one aggregation
     # statistic, so a competition profile can no longer average across two of them. The nine
     # that held 'median' through v0.7.0 moved in both families at once, `add` passing one
     # `agg` per wilcoxon/deseq2 sibling pair. `vcc2026` names the RAW direction pair since
     # #231; the chance-corrected pair stays in full/de.
     # Raw counterpart of sig_mcc, appended last to preserve the existing family order.
-    ('de_wilcoxon_sig_jaccard', None, 'one', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_jaccard', (), (), False, (True, 'higher', 1.0, 'none', None, None, None, None, False, 0.0)),
+    ('de_wilcoxon_sig_jaccard', None, 'one', None, ('full', 'de', 'vcc2026'), (), 'de', None, 'mean', False, 'cell_eval2.metrics.de', 'de_sig_jaccard', (), (), False, (True, 'higher', 1.0, 'none', None, None, None, None, False, 0.0), None),
 ]
 
 
@@ -246,12 +251,15 @@ def test_compute_metrics_deseq2_emits_de_deseq2_names(toy_de_adata):
     assert all(m.startswith("de_deseq2_") for m in de_metrics), sorted(de_metrics)
     assert not any(m.startswith("de_wilcoxon_") for m in de_metrics)
     # The chance-corrected direction metrics deliberately retain unscoreable NaNs
-    # (worst_value=None); every legacy metric in this fixture must remain finite.
+    # (worst_value=None), and since #391 a GATED metric is NaN wherever the reference cannot
+    # score it -- on this 6-gene fixture, everywhere, since the floor is 10 genes. Every other
+    # metric in this fixture must remain finite.
     nonfinite = set(df.filter(~df["value"].is_finite())["metric"].to_list())
     assert all(
-        m.startswith("de_deseq2_direction_")
-        and CATALOG[m].v1_available is False
-        and CATALOG[m].worst_value is None
+        (m.startswith("de_deseq2_direction_")
+         and CATALOG[m].v1_available is False
+         and CATALOG[m].worst_value is None)
+        or CATALOG[m].real_gate is not None
         for m in nonfinite
     )
 

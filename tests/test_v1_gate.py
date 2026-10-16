@@ -46,6 +46,9 @@ _V1_EMITS = {
                 "de_wilcoxon_overlap", "de_wilcoxon_precision", "delta_pearson",
                 "expr_mae", "expr_mse", "pds_l1"],
     "pds": ["pds_l1"],
+    # v2-native single-cell heterogeneity families: no v1_name, so `--version v1` emits nothing
+    # (profile-sourced not-v1-available names are filtered silently by `resolve_metrics`).
+    "cell": [],
     "vcc": ["de_wilcoxon_overlap", "expr_mae", "pds_l1"],
     # ⚠️ ONE of six. Five of vcc2026's members are v2-native, and `resolve_metrics` filters a
     # not-v1-available name SILENTLY when it arrived via a PROFILE (only an explicitly named

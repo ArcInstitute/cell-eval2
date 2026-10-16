@@ -26,7 +26,50 @@ _DE_BACKENDS = ("auto", "gpudge", "pdex", "scanpy", "deseq2")
 _MEAN_CALCS = ("arithmetic", "geometric")
 _NAN_LFC_POLICIES = ("keep", "mask")
 _FDR_SCOPES = ("global", "per_pert")
-_AUC_PVAL_FLOORS = ("clip", "replace_zero", "min_nonzero")
+_AUC_PVAL_FLOORS = ("preserve", "clip", "replace_zero", "min_nonzero")
+
+#: The `EvalConfig.target_gene_map` key that applies to every label WITHOUT an entry of its own
+#: (#397). Only `None` is defined for it: `{"*": None}` declares that no perturbation on the panel
+#: has a target gene -- drug doses, added cytokines -- and is what the CLI's `--no-target-genes`
+#: sets. A label's own entry wins over it.
+NO_TARGET_GENE_WILDCARD = "*"
+
+
+class _Unmapped:
+    """The type of :data:`UNMAPPED`; a class only so the sentinel has a readable repr."""
+
+    def __repr__(self) -> str:
+        return "UNMAPPED"
+
+
+#: What :func:`target_gene_entry` returns for a label the map says nothing about.
+UNMAPPED = _Unmapped()
+
+
+def target_gene_entry(target_gene_map, label):
+    """What ``target_gene_map`` says about ``label`` (#397).
+
+    The ONE reading of the map's ``None`` values and of :data:`NO_TARGET_GENE_WILDCARD`, shared
+    by both target-gene resolvers -- ``distances.resolve_exclusion_columns`` (``pds_*``, the
+    moments metrics, the generic-response baseline) and ``de.resolve_target_genes`` (the DE
+    metrics and the ``de_lfc_nmae`` reference) -- so the five places that exclude a target gene
+    cannot disagree on what a declaration means. Returns:
+
+    * a feature name -- the label's own entry; each resolver treats it exactly as before #397;
+    * ``None`` -- the label is DECLARED to have no target gene: it counts as resolved for the
+      zero-resolve gates, excludes nothing, and is never matched against the features by name;
+    * :data:`UNMAPPED` -- the map is silent, so the caller matches the raw label as before.
+
+    Matching a no-target label by name is not merely redundant, it is wrong: an added cytokine
+    can share its name with a measured gene, and name matching would exclude that gene.
+    """
+    if not target_gene_map:
+        return UNMAPPED
+    if label in target_gene_map:
+        return target_gene_map[label]
+    if target_gene_map.get(NO_TARGET_GENE_WILDCARD, UNMAPPED) is None:
+        return None
+    return UNMAPPED
 
 
 @dataclass
@@ -107,8 +150,8 @@ class DEParams:
     epsilon: float = 1e-9                                           # version-scoped (= v2)
     clip_value: float | None = None  # v1=20.0: pdex zero-mean fold_change clip; None=epsilon/inf (v2)
     fdr_scope: Literal["global", "per_pert"] = "per_pert"  # v1=global (pdex 0.1.27 pools all perts)
-    auc_pval_floor: Literal["clip", "replace_zero", "min_nonzero"] = "min_nonzero"  # v1=replace_zero (cell-eval)
-    auc_pval_floor_value: float = 1e-10  # floor for clip & replace_zero; ignored by min_nonzero
+    auc_pval_floor: Literal["preserve", "clip", "replace_zero", "min_nonzero"] = "min_nonzero"  # v1=replace_zero (cell-eval)
+    auc_pval_floor_value: float = 1e-10  # clip & replace_zero floor; min_nonzero's fallback when no p > 0; unused by preserve
 
     def __post_init__(self) -> None:
         if self.sort_by not in _DE_SORT_KEYS:
@@ -253,8 +296,12 @@ class EvalConfig:
     # digest automatically -- as a function argument two runs with different maps would
     # collide on one cache key; (2) it must be fixed for the whole dataset, since
     # resolution is computed once at PreparedDE construction (spec 2.7b).
+    # A `None` VALUE declares that the label has no target gene at all (#397) -- a drug dose, an
+    # added cytokine: it counts as resolved, excludes nothing, and is never matched by name; and
+    # `{"*": None}` (`NO_TARGET_GENE_WILDCARD`) declares it for every label without an entry of
+    # its own. A set map of any kind takes a run off the competition rule (`rule_config_hash`).
     # APPENDED LAST on purpose -- see the gather_threads comment above.
-    target_gene_map: dict[str, str] | None = None
+    target_gene_map: dict[str, str | None] | None = None
     # The expression comparator's target sum (issue #264). NOT `target_sum`: that one is
     # per-cell and drives input normalization and the whole DE family; this one is per-GROUP
     # and drives `bulk_lognorm` alone, which is why a run carries both. A field rather than a
@@ -340,6 +387,33 @@ class EvalConfig:
                 "metric is v2-native. Use version='v2' with the deseq2 backend, or keep "
                 "version='v1' with a rank backend."
             )
+        # #397. The wildcard is defined for `None` only. Before #397 a `"*"` key was an ordinary
+        # label, so `{"*": "GENEX"}` mapped a perturbation literally named "*"; refusing it keeps
+        # the key from reading as "map every label to GENEX", which nothing implements.
+        if (isinstance(self.target_gene_map, Mapping)
+                and self.target_gene_map.get(NO_TARGET_GENE_WILDCARD) is not None):
+            raise ValueError(
+                f"target_gene_map[{NO_TARGET_GENE_WILDCARD!r}] must be None, got "
+                f"{self.target_gene_map[NO_TARGET_GENE_WILDCARD]!r}: the wildcard declares that "
+                "every label without an entry of its own has no target gene (#397). Map a "
+                "label to its gene with an entry of its own."
+            )
+        # #397, and the two resolvers are why: `distances.resolve_exclusion_columns` str()s the
+        # map's keys and `de.resolve_target_genes` does not (a pre-#397 asymmetry, left alone for
+        # maps that declare nothing). In a map that DOES declare, a non-string key splits them:
+        # `{123: null}` (an unquoted numeric YAML label) is declared for pds_* and the moments
+        # metrics but not for the DE metrics, and `{123: GENEX, "*": null}` -- which
+        # `--no-target-genes` builds from such a config -- excludes GENEX on one side and declares
+        # the label on the other (codex review).
+        if (isinstance(self.target_gene_map, Mapping)
+                and any(v is None for v in self.target_gene_map.values())):
+            bad = [k for k in self.target_gene_map if not isinstance(k, str)]
+            if bad:
+                raise ValueError(
+                    f"target_gene_map declares a label to have no target gene (#397), so every "
+                    f"label in it must be a string; got {bad[:5]!r}. In YAML, quote a numeric "
+                    "label: '123': null."
+                )
         if self.cache_real is not None and self.cache_pred is not None:
             # realpath resolves symlinks + ./cache-vs-cache + trailing slashes; normcase makes it
             # case-insensitive on Windows/macOS (no-op on POSIX). Best-effort collision guard.

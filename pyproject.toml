@@ -1,6 +1,6 @@
 [project]
 name = "cell-eval2"
-version = "0.18.0"
+version = "0.19.0"
 description = "Clean, streamlined, GPU-accelerated reimplementation of cell-eval"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -42,7 +42,12 @@ dependencies = [
 # ⚠️ Wheels are cp311/cp312 on **glibc x86-64 Linux** only (`manylinux_2_28_x86_64`). macOS,
 # Windows, ARM Linux and PyPy all fall through to the sdist and need a Rust toolchain. Our CI
 # matrix is 3.11/3.12 on ubuntu, which the wheels cover exactly.
-scale = ["cellstream>=0.9.1"]
+scale = [
+    "cellstream>=0.9.1",
+    # The DE table writer (de_export.py) uses pyarrow.parquet.ParquetWriter for an
+    # explicit zstd-level/row-group contract polars' write_parquet cannot express.
+    "pyarrow>=15",
+]
 # nvidia-nvcomp-cu12: cellstream's GPU .shad decode (read_v2_subset_to_device) needs nvCOMP in
 # addition to cupy; without it the scale/streaming GPU tests fail at import instead of running.
 # ⚠️ DELIBERATELY UNPINNED, while `cellstream[gpu]` pins `nvidia-nvcomp-cu12>=4,<5`. We resolve
@@ -108,6 +113,9 @@ dev = [
     # transitive `pdex>=0.2.2` of `cell-eval==0.7.2` -- an unpinned floor on the engine behind a
     # numeric pin. A bump here means re-measuring the GOLDEN table, deliberately (#381).
     "pdex==0.3.0",
+    # Tests validate de_export's on-disk contract by reading per-column-chunk codecs, which
+    # only pyarrow.parquet exposes (polars does not surface per-chunk compression metadata).
+    "pyarrow>=15",
 ]
 
 [tool.hatch.build.targets.wheel]

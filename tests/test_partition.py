@@ -208,13 +208,19 @@ def test_result_semantics_payload_covers_agg_derived_normalization_and_worst_val
             # member's policy nor even its arithmetic, but the PSEUDOBULK that arithmetic reads.
             # `prep._grouped_sums` reduces WIDE, so two pieces either side of it carry bulks
             # rounded differently under one metric name.
-            "grouped_sum_reduction_semantics"} == set(sem)
+            "grouped_sum_reduction_semantics",
+            # #391: each metric's reference-only gate, beside its worst_value (it decides which
+            # rows are NaN before the fill runs), and the counter for what the gated fill does.
+            "metric_real_gate", "real_gate_semantics",
+            # #397: what a `None` value in `target_gene_map`, and its "*" key, mean.
+            "no_target_gene_semantics"} == set(sem)
     # The schema number is pinned EXACTLY. `<= {True, False}` and a `current - 1` stale test both
     # pass for a reverted constant or an all-False mapping, which codex-review round 3 called out as
     # non-discriminating. Bumped 2 -> 3 by #172, 3 -> 4 by the `reach_purity_floor` term and
-    # 4 -> 5 by #271's `grouped_sum_reduction_semantics`, per this module's own "bump when the
-    # payload gains a term" rule.
-    assert sem["schema"] == 5
+    # 4 -> 5 by #271's `grouped_sum_reduction_semantics`, 5 -> 6 by #391's `metric_real_gate`
+    # and `real_gate_semantics`, and 6 -> 7 by #397's `no_target_gene_semantics`, per this
+    # module's own "bump when the payload gains a term" rule.
+    assert sem["schema"] == 7
     # kind routes the dispatch; needs_moments selects a DIFFERENT cache artifact and computation.
     assert dict(sem["metric_kind"])["pds_cosine"] == "anndata"
     assert dict(sem["metric_kind"])["de_wilcoxon_lfc_nmae"] == "de"

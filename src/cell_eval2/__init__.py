@@ -11,6 +11,7 @@ from .baseline import BaselineResult, build_generic_baseline
 from .score import score_metrics
 from .h5ad_manifest import MemBudget, ScoreResult, score_h5ad_manifest
 from .rowstore import read_rowstore_plan, score_rowstore
+from .ground_truth_cache import fingerprint_ground_truth_cell_archive
 
 try:
     # Single source of truth: the version is declared only in pyproject.toml, and read here
@@ -37,6 +38,7 @@ __all__ = [
     "aggregate_metrics_wide",
     "build_generic_baseline",
     "cell_archive_input_type",
+    "fingerprint_ground_truth_cell_archive",
     "precompute_cache",
     "score_metrics",
     "score_cellstream",

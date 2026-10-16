@@ -126,3 +126,57 @@ def counts_bundle_inputs():
     baseline_pred = _build(13, None)          # no skill: the 0 end
     submission_pred = _build(12, effects)     # a good prediction: something to score
     return baseline_pred, real, submission_pred
+
+
+# ---- #391 gate fixtures -----------------------------------------------------------------------
+# One 60-gene DE block per target. Sixty because the polars defect the gate's constancy check
+# guards against (internal:docs/internal/superpowers/specs/2026-10-08-real-side-nan-not-scored-design.md
+# §5.2) first shows at a gate of 49 genes, and the floor is 10.
+
+GATE_GENES = [f"g{i:02d}" for i in range(60)]
+GATE_NS = 0.9                     # a non-significant p_adj
+
+
+def gate_block(target, lfc, padj, genes=None):
+    """A DE table block for one target: one row per gene. ``None`` stays null."""
+    import polars as pl
+
+    genes = GATE_GENES if genes is None else list(genes)
+    return pl.DataFrame({"target": [target] * len(genes), "feature": genes,
+                         "log2_fold_change": [None if x is None else float(x) for x in lfc],
+                         "p_adj": [None if x is None else float(x) for x in padj]},
+                        schema={"target": pl.String, "feature": pl.String,
+                                "log2_fold_change": pl.Float64, "p_adj": pl.Float64})
+
+
+def gate_sig(k, n=len(GATE_GENES)):
+    """p_adj for n genes, the first k of them significant."""
+    return [1e-4] * k + [GATE_NS] * (n - k)
+
+
+def gate_lfc(seed, n=len(GATE_GENES)):
+    """n log2FCs drawn from a fixed seed -- distinct values, both signs."""
+    import numpy as np
+
+    return np.random.default_rng(seed).normal(size=n).tolist()
+
+
+def gate_prep(real_blocks, pred_blocks):
+    """A PreparedDE from per-target blocks."""
+    import polars as pl
+
+    from cell_eval2.de import prepare_de
+
+    return prepare_de(pl.concat(pred_blocks), pl.concat(real_blocks), control="non-targeting")
+
+
+def gate_v2(names, prep, **cfg):
+    """{metric: {perturbation: value}} from the v2 DE dispatch."""
+    from cell_eval2.config import EvalConfig
+    from cell_eval2.run import dispatch_de_metrics
+
+    rows = dispatch_de_metrics(names, prep, EvalConfig(version="v2", device="cpu", **cfg))
+    out: dict[str, dict[str, float]] = {}
+    for r in rows:
+        out.setdefault(r["metric"], {})[r["perturbation"]] = r["value"]
+    return out

@@ -337,10 +337,29 @@ Let $S_p = \lbrace g : p^{\mathrm{adj}}_{p,g} \lt T \rbrace$ denote the signific
   cannot be scored: the four `de_*_nsig_counts_*` entries and the four per-perturbation
   expression diagnostics in §2.3 (the derived metric's two components, its uncapped audit
   sibling, and `expr_real_mass_ratio`).
-- **No droppable NaN (v2).** A degenerate perturbation (e.g. no significant genes, a
-  single-class label, a zero-variance correlation) must never silently vanish from the mean.
-  In **v2**, such cases map to the metric's **worst** value so they count as a penalty; **v1**
-  keeps the upstream omit/NaN behavior for parity. The worst value is noted per metric below.
+- **Who made it undefined decides (v2, issue #391).** When the *prediction* makes a
+  perturbation undefined — a flat or missing prediction, or one that calls nothing where the
+  metric needs calls — it scores the metric's **worst** value, so a submission cannot escape a
+  penalty by making itself undefined. When the *reference* does — it has no significant genes,
+  or too few for the metric to mean anything — the perturbation is **not scored**: its row is
+  NaN and it leaves the aggregate. That second decision is made from the reference alone, never
+  reading the prediction, so the unscored set is identical for every submission. Every gated
+  metric but `delta_pearson` (whose points are every measured gene) has a floor: fewer than
+  `min_gate_size` (default 10) reference-side points and the perturbation is not scored. **v1** keeps the upstream omit/NaN behavior for parity. The gate
+  and the worst value are noted per metric below and in §7. A gated metric that scores **no**
+  perturbation at all on a weak panel aggregates to NaN on the submission and on any baseline
+  built against the same reference; `score_metrics` then leaves it out of `avg_score` with a
+  warning rather than refusing the run (§6.1).
+- **Target genes, and panels without them (#397).** `pds_*` (§3), the moments metrics behind
+  `expr_mse_unbiased_capped_norm` (§2.3), the target-excluding DE metrics (§4) and the
+  generic-response baseline (§6a) drop each perturbation's own target gene. "Its target gene" is
+  `EvalConfig.target_gene_map[label]` when the map has an entry, else the label itself matched
+  against the measured genes, and a panel on which no label resolves **raises** rather than
+  excluding nothing (#248). A `None` value in the map declares that a label has **no** target
+  gene — a drug dose, an added cytokine — and `{"*": None}` (the CLI's `--no-target-genes`)
+  declares it for every label without an entry of its own. A declared label excludes nothing,
+  is never matched by name (a cytokine can share its name with a measured gene), and counts as
+  resolved for that check. Any set map takes a run off the competition rule.
 
 ---
 
@@ -745,9 +764,12 @@ Pearson correlation between the predicted and real effect vectors, across genes:
 ```
 
 Range $[-1,1]$; **best $=1$**. It measures the *shape* of the effect (correlation), not its
-magnitude. **Degenerate:** if either effect vector has zero variance (e.g. a constant / mean-
-baseline prediction $\Rightarrow \hat{\delta}_p \equiv 0$), the correlation is undefined; in
-**v2** this maps to the worst value $-1$ (issue #92), in v1 it is NaN.
+magnitude. **Degenerate:** if either effect vector has zero variance, the correlation is
+undefined. In **v2** a constant *predicted* delta (e.g. a constant / mean-baseline prediction
+$\Rightarrow \hat{\delta}_p \equiv 0$) scores the worst value $-1$ (issue #92) — checked exactly
+since #391, because for a two-gene input some scipy versions return $0$ rather than NaN — while a
+constant or non-finite *reference* delta is not scored (NaN, issue #391) — unreachable on real
+pseudobulk. v1 emits NaN for both.
 
 ---
 
@@ -869,7 +891,9 @@ upstream, so this does not re-pool the multiple-testing correction):
 
 † measured at the old `direction_reach_raw` purity floor $P_0 = 0.975$ (§4.3). The Δ is $0$
 because the metric already excludes the gene, which the floor does not affect; the *level*
-$0.996721$ is from that run and has not been re-measured at $P_0 = 0.9$.
+$0.996721$ is from that run and has not been re-measured at $P_0 = 0.9$. The
+`de_wilcoxon_sig_recall` row likewise predates #391, whose gate no longer scores a target with
+fewer than 10 reference-significant genes (about a tenth of val A); it was not re-measured.
 
 The gene is not rare and it is not marginal: it appears in **299 of 300** targets' reference
 rows and is reference-**significant in all 299**. The baseline arm barely moves when it is
@@ -1024,8 +1048,11 @@ perturbations with $\ge 1$ real-significant gene, broadcast to every perturbatio
 \mathrm{nsig\_spearman} = \rho_{\text{Spearman}}\big(\{|S_p^{\text{real}}|\}_p,\ \{|S_p^{\text{pred}}|\}_p\big).
 ```
 
-Range $[-1,1]$; **best $=1$**. **Degenerate** (undefined correlation, e.g. zero-variance
-counts): **v2** worst $-1$ (issue #92), v1 NaN.
+Range $[-1,1]$; **best $=1$**. **v2** (issue #391): the reference decides first, and globally —
+with fewer than `min_gate_size` (10) targets carrying a significant gene, or one count shared by
+all of them, the metric is not scored (NaN for every perturbation). That also retires the $1.0$
+every submission used to receive when no target had a significant gene. Otherwise a constant
+predicted count vector scores the worst value $-1$ (issue #92). v1 NaN.
 
 ### 4.2 Top-gene overlap and precision
 
@@ -1067,8 +1094,9 @@ that are also significant in the prediction:
 \mathrm{sig\_recall}_p = \frac{\big|\,S_p^{\text{real}} \cap S_p^{\text{pred}}\,\big|}{\big|\,S_p^{\text{real}}\,\big|}.
 ```
 
-Range $[0,1]$; **best $=1$**. **v2** worst $=0$ for perturbations with no real-significant
-genes (issue #89); v1 omits them.
+Range $[0,1]$; **best $=1$**. **v2:** a perturbation with fewer than `min_gate_size` (10)
+real-significant genes is not scored (NaN, issue #391); every other one is defined, so nothing is
+filled. v1 omits only those with none.
 
 **`de_wilcoxon_direction_match`** (v1 `de_direction_match`) — among real-significant genes that
 are also present in the prediction ($\mathcal{G}^{\text{pred}}$), the fraction whose predicted
@@ -1078,7 +1106,10 @@ log₂FC has the **same sign** as the real one:
 \mathrm{direction\_match}_p = \frac{1}{|S_p^{\text{real}} \cap \mathcal{G}^{\text{pred}}|}\sum_{g \in S_p^{\text{real}} \cap \mathcal{G}^{\text{pred}}} \mathbf{1}\!\big[\operatorname{sign}(\widehat{\mathrm{lfc}}_{p,g}) = \operatorname{sign}(\mathrm{lfc}_{p,g})\big].
 ```
 
-Range $[0,1]$; **best $=1$**. **v2** worst $=0$ (issue #89); v1 omits zero-real-sig perts.
+Range $[0,1]$; **best $=1$**. **v2:** fewer than `min_gate_size` (10) real-significant genes and
+the perturbation is not scored (NaN, issue #391); inside that gate, a prediction that covers none
+of them, or carries no log₂FC for them, scores the worst value $0$ (issue #89). v1 omits
+zero-real-sig perts.
 
 **`de_wilcoxon_model_direction_match`** (v1 `de_model_direction_match`) — the reverse
 conditioning: among model-significant genes that are also present in the real DE table
@@ -1090,7 +1121,10 @@ conditioning: among model-significant genes that are also present in the real DE
 
 Real significance is deliberately ignored: every model DEG contributes a sign check whenever
 the gene is present in the real table. Range $[0,1]$; **best $=1$**. **v2** worst $=0$ for
-perturbations with no model-significant genes; v1 omits them.
+perturbations with no model-significant genes; v1 omits them. A perturbation whose reference has
+fewer than `min_gate_size` (10) genes with a log₂FC at all is not scored (NaN, issue #391) — a
+reference with nothing to compare against is not the prediction's doing. It never binds on a real
+panel.
 
 > **Superseded by `de_wilcoxon_direction_precision`.** `model_direction_match` compares
 > `sign(lfc)` with a plain `==`, so a gene whose log₂FC is exactly $0$ — or `NaN` — on
@@ -1128,7 +1162,9 @@ data of this kind.
 
 Duplicate `(target, feature)` rows raise rather than being silently fanned out by the join.
 
-Range $[0,1]$; **best $=1$**, worst $=0$.
+Range $[0,1]$; **best $=1$**, worst $=0$ — charged when the prediction makes no adjudicable call. A perturbation
+whose reference has fewer than `min_gate_size` (10) genes with a log₂FC direction is not scored
+(NaN, issue #391); it never binds on a real panel.
 
 **`de_wilcoxon_direction_sensitivity`** (v2-native) — how deep the prediction's ranking
 stays directionally pure, relative to what the reference confidently adjudicated:
@@ -1195,9 +1231,11 @@ $N_{\mathrm{conf}}(t)$ counts reference-significant genes across the **whole rea
 not only those the prediction covers, so a model cannot shrink its own **budget** by
 omitting genes.
 $k^* = 0$ when purity never reaches $P_0$ — a computed zero. Targets where the reference
-adjudicated nothing ($N_{\mathrm{conf}} = 0$) are undefined and take the worst value $0$
-under v2; ⚠️ that fraction has been measured at 13–24% on real data, so it moves the
-aggregate materially.
+adjudicated fewer than `min_gate_size` (10) genes — including none ($N_{\mathrm{conf}} = 0$) — are
+not scored under v2 (NaN, issue #391). Until #391 a target with $N_{\mathrm{conf}} = 0$ took the
+worst value $0$ and one with 1–9 adjudicated genes was scored; ⚠️ the $N_{\mathrm{conf}} = 0$
+fraction alone has been measured at 13–24% on real data, so the change moves the aggregate
+materially.
 
 ⚠️ **That invariance is denominator-only, and the score is not omission-proof**
 (#291). This sentence used to
@@ -1335,8 +1373,16 @@ values over the real-significant genes (predicted LFC filled with $0$ where abse
 \mathrm{lfc\_spearman}_p = \rho_{\text{Spearman}}\big(\{\mathrm{lfc}_{p,g}\}_{g\in S_p^{\text{real}}},\ \{\widehat{\mathrm{lfc}}_{p,g}\}_{g\in S_p^{\text{real}}}\big).
 ```
 
-Range $[-1,1]$; **best $=1$**. **v2** worst $=-1$ for degenerate/undefined cases (issue #89);
-v1 omits/NaN.
+Range $[-1,1]$; **best $=1$**. **v2** (issue #391): a perturbation with fewer than
+`min_gate_size` (10) real-significant genes, or with one log₂FC shared by all of them, is not
+scored (NaN). Two reasons, kept apart: below two genes, or with a constant reference log₂FC, the
+correlation is undefined; from two genes up to the floor it is defined but too noisy to rank a
+submission on, so the floor is a minimum-sample rule rather than a mathematical one. Inside that
+gate, a prediction that is constant over the gated genes (flat, or absent and filled with $0$)
+scores the worst value $-1$ (issue #89). That is checked explicitly, because polars 1.x does not
+reliably return NaN for a constant column (1.43.2 returns a finite value at 70 of the gate sizes
+from 2 to 1199; 2.0.0 returns NaN at all of them). A prediction that merely calls nothing
+significant is *not* undefined here: the metric reads its log₂FCs, not its calls. v1 omits/NaN.
 
 **`de_wilcoxon_lfc_spearman_pos`** (v1 `de_spearman_pos_lfc_sig`) and
 **`de_wilcoxon_lfc_spearman_neg`** (v1 `de_spearman_neg_lfc_sig`) — the same correlation
@@ -1350,8 +1396,10 @@ or negative (`neg`, down-regulated):
 and analogously $S_p^{\text{real},-}=\lbrace g\in S_p^{\text{real}} : \mathrm{lfc}_{p,g} \lt 0\rbrace$ for
 `neg`. They diagnose **directional asymmetry** — a model that recovers induced genes well but
 repressed genes poorly (or vice versa) — which the combined `lfc_spearman` can mask. Range
-$[-1,1]$; **best $=1$**; **v2** worst $=-1$ for degenerate/undefined cases (a perturbation with no
-qualifying up-/down-regulated significant gene); v1 omits/NaN.
+$[-1,1]$; **best $=1$**; **v2:** the same gate over the up- or down-regulated subset — fewer than
+`min_gate_size` (10) qualifying genes and the perturbation is not scored (NaN, issue #391); a
+constant prediction over the subset scores $-1$. On the official val panels the floor leaves
+43–57% of targets unscored on `_pos` and 19–36% on `_neg`. v1 omits/NaN.
 
 **`de_wilcoxon_lfc_nmae`** (v2-native, no v1 alias; issue
 #208) — the **magnitude** counterpart of
@@ -1484,9 +1532,38 @@ not blow up):
 - `pr_auc` is the **average precision** (area under the precision–recall curve),
 - `roc_auc` is the **area under the ROC curve** (true-positive rate vs false-positive rate).
 
+The floor is `de.auc_pval_floor`. Under every policy a missing or NaN prediction first takes
+$p=1$. **v2's default is `min_nonzero`**: an exact-zero predicted p-value takes the smallest
+positive p-value among the scored rows of the whole table, so the zeros tie with it. v1's is
+`replace_zero`, cell-eval's convention: a float32 round-trip, then $0\to$ `auc_pval_floor_value`
+($10^{-10}$). `clip` clips at `auc_pval_floor_value`. `preserve` (since 0.19.0) casts the
+p-values to float64 and floors only at `np.nextafter(0.0, 1.0)` ($\approx 4.94\times10^{-324}$,
+the smallest positive float64). An exact zero takes that value, so it ties only with a p-value of
+exactly that size and ranks above every larger one. No policy can recover an ordering the DE
+producer has already lost.
+
+**Partitioned scoring** — the `partition_inmem` engine under `score_cellstream`,
+`score_h5ad_manifest` and `score_rowstore` — cannot take a whole-table minimum, so where the config
+says `min_nonzero` it computes `preserve`; `preserve`, `clip` and `replace_zero` are elementwise
+and pass through unchanged. On a Float64 p-value table, which is what gpudge emits, the two
+policies differ only in the value an exact zero takes: `min_nonzero` ties a zero with the table's
+smallest positive p-value wherever the two share a perturbation (and with any p-value whose
+$-\log_{10}$ rounds to the same score), while `preserve` ranks it above every p-value larger than
+its floor. (On a Float32 table `preserve` also takes the logarithm in float64, where
+`min_nonzero` keeps float32 precision and can tie neighbouring values.) Before 0.19.0 partitioned
+scoring computed `replace_zero` at $10^{-10}$ instead. Its float32 round-trip turns any $p$ below
+about $7\times10^{-46}$ into 0 and then $10^{-10}$, so an underflowed $10^{-100}$ ranked below a
+weaker $10^{-20}$. To reproduce those numbers, set `de.auc_pval_floor: replace_zero` and
+`de.auc_pval_floor_value: 1e-10` explicitly. Recompute any partitioned AUC from an earlier
+version, baselines and ceilings scored that way included, before comparing it with current
+results. Whole-table scoring is unchanged, and so are the `baseline` and `ceiling` builders,
+which use it.
+
 Both range $[0,1]$; **best $=1$** (ROC $0.5$ = chance). A perturbation with a **single-class**
-label (all genes significant, or none) has an undefined AUC: **v2** maps it to the worst value
-$0$ (issue #89); v1 emits NaN.
+label (all genes significant, or none) has an undefined AUC, and the labels are the reference's:
+**v2** does not score it (NaN, issue #391), nor a perturbation with fewer than `min_gate_size` (10)
+significant genes. Every other perturbation is defined, so nothing is filled. v1 emits NaN for the
+single-class case.
 
 ### 4.5 Symmetric significance agreement (Jaccard)
 
@@ -1526,7 +1603,8 @@ combining two documented rules, not an artifact.
 
 Because the union grows with the predicted set, `sig_jaccard` is **not** gameable by flooding
 significance — the failure mode §5 raises against the naive adjusted-Rand form. Measured over
-five submissions of the 24-submission VCC campaign, one of them scores `sig_recall` $=0.96$ —
+five submissions of the 24-submission VCC campaign (measured before #391's gate), one of them
+scores `sig_recall` $=0.96$ —
 it recovers almost every real DEG — while its `sig_jaccard` is $0.16$ and its `sig_mcc` is
 $0.02$, i.e. chance: it calls so many genes significant that recovering the real ones costs it
 nothing. The other four sit at `sig_recall` $\in [0.38, 0.65]$ with `sig_jaccard`
@@ -1586,9 +1664,18 @@ three lie in $[-1,1]$: $0$ = chance (independence), $1$ = perfect, $-1$ = perfec
 | `de_wilcoxon_sig_mcc` | significance membership | MCC |
 | `de_wilcoxon_overlap_adjusted` | top-$m_r$ **ranked** membership (real vs pred top-$m_r$) | MCC |
 
-**best $=1$** for all four. A degenerate table (any of $a,b,G-a,G-b$ equal to $0$ — e.g. no
-significant genes, or a prediction that floods every gene as significant) maps to the worst
-value $-1$ for every perturbation, so it is penalized rather than dropped.
+**best $=1$** for all four. A degenerate table (any of $a,b,G-a,G-b$ equal to $0$) maps to $-1$
+inside the metric, and since #391 only the *prediction-side* half of that is charged. On
+`sig_mcc` and `precision_adjusted`, a prediction that calls nothing ($b = 0$) or floods every gene
+($b = G$) scores $-1$. On `overlap_adjusted` only an empty prediction ranking does: its $b$ is the
+prediction's top-$m_r$, capped at the reference's $m_r$, so flooding significance with the right
+genes ranked first still scores $1$. `sig_recall_adjusted` (informedness) has no prediction-side
+degeneracy: at $b = 0$ or $b = G$ it is a defined $0$. A reference with fewer than
+`min_gate_size` (10) significant genes, or whose every row is significant, is not scored (NaN) for
+`sig_recall_adjusted` and `sig_mcc`. `overlap_adjusted` reads its reference set from the ranked
+significant genes, which leave out a row with a null feature: it needs 10 significant NAMED genes,
+fewer than the reference has rows. `precision_adjusted` has no reference-side degeneracy and is
+not gated.
 
 Why not the naive adjusted-Rand form $(\text{obs}-\mathbb{E})/(\min(a,b)-\mathbb{E})$? It is
 **gameable by flooding significance** — marking most genes significant drives the observed
@@ -1891,6 +1978,12 @@ denominator $D$ is not a **finite positive** number, or whose $b$ is itself non-
   asked. This includes $b = 1$ on an anchor-1 metric, which previously scored every submission
   exactly $0$, silently. The bounded (anchor-1) metrics otherwise keep the $\ge 0$ clamp, except
   the four unfloored `vcc2026` members, whose missing-value sentinel is `metric_min` instead.
+  **One exception (issue #391):** a gated metric whose `mean` aggregate is non-finite on **both**
+  the submission and the baseline (v2 spelling) has a reference-only gate that admitted no
+  perturbation — a property of the shared reference, not a degenerate baseline — so it is
+  excluded from `avg_score` with a warning, whatever `--comparison-statistic` is. Non-finite on
+  one side only means the two were computed against different references or settings, and is
+  refused. No `vcc2026` member is gated.
 
 For any other scored metric — a large class (see `catalog.is_decisive`) — a degenerate baseline
 logs a warning and that one metric is excluded from `avg_score`, rather than aborting the run —
@@ -2033,6 +2126,10 @@ offenders in the stamp, each tagged `decisive`. What that buys depends on which 
   that `vcc`/`vcc2026` scores, so for those the waiver is diagnostic-only; an artifact degenerate
   only on other scored metrics is **scored with those metrics dropped** from `avg_score` (and
   refused if that leaves nothing).
+  A gated metric whose `mean` is non-finite because its reference-only gate admitted no
+  perturbation (issue #391) is not an offender: that is a property of the reference, and
+  `score_metrics` decides at scoring time (§6.1). Such a metric does not count towards the "at
+  least one scoreable metric" the build requires either.
 
 **Scale.** Dispersed prediction mirrors the template's sparsity: a sparse template produces
 CSR float32, a dense template produces a dense float32 array, and the dense
@@ -2357,7 +2454,9 @@ the route to one is `overrides={"de_wilcoxon_lfc_nmae": ERROR}`, not a global se
 raises on the first higher-is-better member. Under such a per-metric policy the declared `-6` floor
 still catches a non-finite value the cap would otherwise have set.) A degenerate replicate scale — no headroom over the baseline, or a non-finite end
 — raises for a **DECISIVE** metric, which includes every `vcc2026` member, and warns-and-omits
-any other metric. It no longer silently nulls the row.
+any other metric. It no longer silently nulls the row. A gated metric the baseline pass already
+excluded because its reference-only gate admitted no perturbation (issue #391, §6.1) is left off
+the replicate scale with a warning before this check, so it is not refused one step later.
 
 **Enrolment depends on the artifact.** With `score --real-bundle` on a **competition** bundle,
 `from_replicate` at `avg_score` is the competition score and `from_baseline` at `avg_score` goes
@@ -2572,64 +2671,71 @@ A digest test enforces the current registry.
 `dir`: ↓ = lower is better, ↑ = higher is better, · = no direction.
 `anchor`: the value a perfect submission attains (blank = none defined).
 `scored`: ✓ = enters `avg_score`.
-`worst (v2)`: value a degenerate perturbation maps to in v2 (— = not applicable / cannot drop).
-⚠️ This column is **not** simply `MetricSpec.worst_value`: the four §5 chance-corrected metrics
-carry `worst_value=None` because the $-1$ is applied *inside the metric*, and
+`gate (v2)`: what the reference must supply before a perturbation is scored (issue #391;
+— = ungated). Below it the row is NaN and leaves the aggregate. "sig" counts real-significant
+genes; the floor is `min_gate_size`, default 10.
+`worst (v2)`: what a perturbation the *prediction* makes undefined scores in v2, inside the gate
+(— = none possible / not applicable).
+⚠️ The `worst` column is **not** simply `MetricSpec.worst_value`: the four §5 chance-corrected
+metrics carry `worst_value=None` because the $-1$ is applied *inside the metric*, and
 `de_wilcoxon_sig_jaccard` carries `worst_value=None` because it returns $1.0$ for an empty
 union inside the metric rather than deferring to the v2 dispatch. Do not regenerate this
 column from the catalog alone — see the note below the table.
-Profiles: **v**=vcc, **2026**=vcc2026, **m**=minimal, **f**=full, **a**=anndata, **d**=de, **p**=pds.
+Profiles: **v**=vcc, **2026**=vcc2026, **m**=minimal, **f**=full, **a**=anndata, **d**=de, **p**=pds, **c**=cell (opt-in, unscored; §8).
 
-| metric (v2) | v1 alias | range | dir | anchor | scored | worst (v2) | profiles |
-|---|---|---|---|---|---|---|---|
-| `expr_mae` | `mae` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | v m f a |
-| `expr_mse` | `mse` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | m f a |
-| `expr_mse_unbiased` | — | $(-\infty,\infty)$ | · | | | — | f a 2026 |
-| `expr_mse_unbiased_capped` | — | $(-\infty,\infty)$ | · | | | — | f a 2026 |
-| `expr_distance_unbiased` | — | $(-\infty,\infty)$ | · | | | — | f a 2026 |
-| `expr_real_mass_ratio` | — | $[0,\infty)$ | · | | | — | f a 2026 |
-| `expr_mse_unbiased_capped_norm` | — | $(-\infty,\infty)$ | ↓ | $0$ | ✓ | — | f a 2026 |
-| `delta_mae` | `mae_delta` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | f a |
-| `delta_mse` | `mse_delta` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | f a |
-| `delta_pearson` | `pearson_delta` | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | m f a |
-| `pds_l1` | `discrimination_score_l1` | $[0,1]$ | ↑ | $1$ | ✓ | — | v m f a p |
-| `pds_l2` | `discrimination_score_l2` | $[0,1]$ | ↑ | $1$ | ✓ | — | f a |
-| `pds_cosine` | `discrimination_score_cosine` | $[0,1]$ | ↑ | $1$ | ✓ | — | f a 2026 |
-| `de_wilcoxon_overlap` | `overlap_at_N` | $[0,1]$ | ↑ | $1$ | ✓ | — | v m f d |
-| `de_wilcoxon_overlap_top{50,100,200,500}` | `overlap_at_{k}` | $[0,1]$ | ↑ | $1$ | ✓ | — | f d |
-| `de_wilcoxon_precision` | `precision_at_N` | $[0,1]$ | ↑ | $1$ | ✓ | — | m f d |
-| `de_wilcoxon_precision_top{50,100,200,500}` | `precision_at_{k}` | $[0,1]$ | ↑ | $1$ | ✓ | — | f d |
-| `de_wilcoxon_nsig_counts_real` | `de_nsig_counts_real` | $[0,G]$ | · | | | — | m f d |
-| `de_wilcoxon_nsig_counts_pred` | `de_nsig_counts_pred` | $[0,G]$ | · | | | — | m f d |
-| `de_wilcoxon_nsig_spearman` | `de_spearman_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_sig_recall` | `de_sig_genes_recall` | $[0,1]$ | ↑ | $1$ | ✓ | $0$ | f d |
-| `de_wilcoxon_direction_match` | `de_direction_match` | $[0,1]$ | ↑ | $1$ | ✓ | $0$ | f d |
-| `de_wilcoxon_model_direction_match` | `de_model_direction_match` | $[0,1]$ | ↑ | $1$ | ✓ | $0$ | f d |
-| `de_wilcoxon_direction_precision` | — | $[0,1]$ | ↑ | $1$ | ✓ | $0$ | f d |
-| `de_wilcoxon_direction_sensitivity` | — | $[0,1]$ | ↑ | $1$ | ✓ | $0$ | f d |
-| `de_wilcoxon_direction_sensitivity_universe` | — | $[0,\infty)$ | ↑ | | ✓ | $0$ | f d |
-| `de_wilcoxon_lfc_spearman` | `de_spearman_lfc_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_lfc_spearman_pos` | `de_spearman_pos_lfc_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_lfc_spearman_neg` | `de_spearman_neg_lfc_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_lfc_nmae` | — | $[0,\infty)$ | ↓ | $0$ | ✓ | — | f d 2026 |
-| `de_wilcoxon_pr_auc` | `pr_auc` | $[0,1]$ | ↑ | $1$ | ✓ | $0$ | f d |
-| `de_wilcoxon_roc_auc` | `roc_auc` | $[0,1]$ | ↑ | $1$ | ✓ | $0$ | f d |
-| `de_wilcoxon_sig_jaccard` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | f d 2026 |
-| `de_wilcoxon_overlap_adjusted` | — | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_precision_adjusted` | — | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_sig_recall_adjusted` | — | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_sig_mcc` | — | $[-1,1]$ | ↑ | $1$ | ✓ | $-1$ | f d |
-| `de_wilcoxon_direction_fidelity` | — | $[-q/d,\ (1-q)/d]$ | ↑ | $1$ | ✓ | — | f d |
-| `de_wilcoxon_direction_fidelity_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | f d |
-| `de_wilcoxon_direction_coverage` | — | $[0,\infty)$ | ↑ | | ✓ | — | f d |
-| `de_wilcoxon_direction_yield` | — | unbounded both ways | ↑ | | ✓ | — | f d |
-| `de_wilcoxon_direction_yield_raw` | — | $[0,\infty)$ | ↑ | | ✓ | — | f d |
-| `de_wilcoxon_direction_fidelity_yield` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | f d |
-| `de_wilcoxon_direction_fidelity_yield_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | f d 2026 |
-| `de_wilcoxon_direction_reach` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | f d |
-| `de_wilcoxon_direction_reach_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | f d 2026 |
-| `de_wilcoxon_direction_reach_unbounded` | — | $[0,\infty)$ | ↑ | | ✓ | — | f d |
-| `de_wilcoxon_direction_reach_unbounded_raw` | — | $[0,\infty)$ | ↑ | | ✓ | — | f d |
+| metric (v2) | v1 alias | range | dir | anchor | scored | gate (v2) | worst (v2) | profiles |
+|---|---|---|---|---|---|---|---|---|
+| `expr_mae` | `mae` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | — | v m f a |
+| `expr_mse` | `mse` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | — | m f a |
+| `expr_mse_unbiased` | — | $(-\infty,\infty)$ | · | | | — | — | f a 2026 |
+| `expr_mse_unbiased_capped` | — | $(-\infty,\infty)$ | · | | | — | — | f a 2026 |
+| `expr_distance_unbiased` | — | $(-\infty,\infty)$ | · | | | — | — | f a 2026 |
+| `expr_real_mass_ratio` | — | $[0,\infty)$ | · | | | — | — | f a 2026 |
+| `expr_mse_unbiased_capped_norm` | — | $(-\infty,\infty)$ | ↓ | $0$ | ✓ | — | — | f a 2026 |
+| `delta_mae` | `mae_delta` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | — | f a |
+| `delta_mse` | `mse_delta` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | — | f a |
+| `delta_pearson` | `pearson_delta` | $[-1,1]$ | ↑ | $1$ | ✓ | Δreal varies | $-1$ | m f a |
+| `pds_l1` | `discrimination_score_l1` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | v m f a p |
+| `pds_l2` | `discrimination_score_l2` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f a |
+| `pds_cosine` | `discrimination_score_cosine` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f a 2026 |
+| `de_wilcoxon_overlap` | `overlap_at_N` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | v m f d |
+| `de_wilcoxon_overlap_top{50,100,200,500}` | `overlap_at_{k}` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d |
+| `de_wilcoxon_precision` | `precision_at_N` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | m f d |
+| `de_wilcoxon_precision_top{50,100,200,500}` | `precision_at_{k}` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d |
+| `de_wilcoxon_nsig_counts_real` | `de_nsig_counts_real` | $[0,G]$ | · | | | — | — | m f d |
+| `de_wilcoxon_nsig_counts_pred` | `de_nsig_counts_pred` | $[0,G]$ | · | | | — | — | m f d |
+| `de_wilcoxon_nsig_spearman` | `de_spearman_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 targets | $-1$ | f d |
+| `de_wilcoxon_sig_recall` | `de_sig_genes_recall` | $[0,1]$ | ↑ | $1$ | ✓ | ≥10 sig | — | f d |
+| `de_wilcoxon_direction_match` | `de_direction_match` | $[0,1]$ | ↑ | $1$ | ✓ | ≥10 sig with an LFC | $0$ | f d |
+| `de_wilcoxon_model_direction_match` | `de_model_direction_match` | $[0,1]$ | ↑ | $1$ | ✓ | ≥10 genes with an LFC | $0$ | f d |
+| `de_wilcoxon_direction_precision` | — | $[0,1]$ | ↑ | $1$ | ✓ | ≥10 genes with a direction | $0$ | f d |
+| `de_wilcoxon_direction_sensitivity` | — | $[0,1]$ | ↑ | $1$ | ✓ | ≥10 sig | — | f d |
+| `de_wilcoxon_direction_sensitivity_universe` | — | $[0,\infty)$ | ↑ | | ✓ | ≥10 sig | — | f d |
+| `de_wilcoxon_lfc_spearman` | `de_spearman_lfc_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 sig, ≥2 LFCs | $-1$ | f d |
+| `de_wilcoxon_lfc_spearman_pos` | `de_spearman_pos_lfc_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 up-sig, ≥2 LFCs | $-1$ | f d |
+| `de_wilcoxon_lfc_spearman_neg` | `de_spearman_neg_lfc_sig` | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 down-sig, ≥2 LFCs | $-1$ | f d |
+| `de_wilcoxon_lfc_nmae` | — | $[0,\infty)$ | ↓ | $0$ | ✓ | — | — | f d 2026 |
+| `de_wilcoxon_pr_auc` | `pr_auc` | $[0,1]$ | ↑ | $1$ | ✓ | ≥10 sig, 2 classes | — | f d |
+| `de_wilcoxon_roc_auc` | `roc_auc` | $[0,1]$ | ↑ | $1$ | ✓ | ≥10 sig, 2 classes | — | f d |
+| `de_wilcoxon_sig_jaccard` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d 2026 |
+| `de_wilcoxon_overlap_adjusted` | — | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 named sig, < rows | $-1$ | f d |
+| `de_wilcoxon_precision_adjusted` | — | $[-1,1]$ | ↑ | $1$ | ✓ | — | $-1$ | f d |
+| `de_wilcoxon_sig_recall_adjusted` | — | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 sig, a non-sig row | — | f d |
+| `de_wilcoxon_sig_mcc` | — | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 sig, a non-sig row | $-1$ | f d |
+| `de_wilcoxon_direction_fidelity` | — | $[-q/d,\ (1-q)/d]$ | ↑ | $1$ | ✓ | — | — | f d |
+| `de_wilcoxon_direction_fidelity_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d |
+| `de_wilcoxon_direction_coverage` | — | $[0,\infty)$ | ↑ | | ✓ | — | — | f d |
+| `de_wilcoxon_direction_yield` | — | unbounded both ways | ↑ | | ✓ | — | — | f d |
+| `de_wilcoxon_direction_yield_raw` | — | $[0,\infty)$ | ↑ | | ✓ | — | — | f d |
+| `de_wilcoxon_direction_fidelity_yield` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d |
+| `de_wilcoxon_direction_fidelity_yield_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d 2026 |
+| `de_wilcoxon_direction_reach` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d |
+| `de_wilcoxon_direction_reach_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d 2026 |
+| `de_wilcoxon_direction_reach_unbounded` | — | $[0,\infty)$ | ↑ | | ✓ | — | — | f d |
+| `de_wilcoxon_direction_reach_unbounded_raw` | — | $[0,\infty)$ | ↑ | | ✓ | — | — | f d |
+| `cell_cov_corr` | — | $[-1,1]$ | · | $1$ | | — | — | c |
+| `cell_cov_eig_ratio` | — | $[0,\infty)$ | · | $1$ | | — | — | c |
+| `cell_cov_ccc` | — | $[-1,1]$ | · | $1$ | | — | — | c |
 
 > The eleven `direction_*` chance-corrected rows (§4.3) were added by issue #195 without a
 > table entry. `de_wilcoxon_direction_yield` is the
@@ -2639,9 +2745,168 @@ Profiles: **v**=vcc, **2026**=vcc2026, **m**=minimal, **f**=full, **a**=anndata,
 > The chance-corrected metrics (§5) map degenerate tables to $-1$ inside the metric itself
 > (always, both versions), while `sig_jaccard` resolves its own only-undefined case (an empty
 > union) to $1.0$ inside the metric. The other v2 worst values are applied by the v2 dispatch
-> (issue \#89 / \#92) while v1 keeps the upstream omit/NaN behavior.
+> (issue \#89 / \#92) while v1 keeps the upstream omit/NaN behavior. Since \#391 the v2
+> dispatch applies the gate first: outside it the row is NaN whatever the metric returned,
+> including an in-metric $-1$.
+
+---
+
+## 8. Cell-level metrics (`cell` profile) — what a pseudobulk cannot see
+
+Issue #386, Part B. **No metric in §2–§5 looks at how genes co-vary across cells.** The
+`expr_*`, `delta_*` and `pds_*` metrics compare pseudobulks (§1.1) — means, and a mean cannot
+see a covariance — and the DE metrics test one gene at a time. So two predictions with the
+same per-gene behaviour and different gene–gene structure can score alike on all of them —
+the disconnect #386 opens with, in Chris Carpenter's words: "we predict a full cellXgene
+matrix, for each perturbation, but in cell_eval2, the first thing we do is take the sum."
+
+The `cell` profile is the opt-in family that measures what the reduction discards. It is
+`kind="cell"`: both sides' raw single cells, with random row access, served **only** by the
+in-memory `compute_metrics` driver. (When every selected metric is a cell metric and both inputs
+are cell-layout `.shad` paths, `compute_metrics` reads straight from the archives instead of
+materializing either side: `cell_cov_ccc` reads only the cells it samples, while
+`cell_cov_corr` and `cell_cov_eig_ratio` also stream, in chunks, every real cell of each
+perturbation and of the control to pick their responding genes.) The streaming (`scale.py`) and partitioned
+(`partition_inmem.py`) drivers carry pseudobulk and no cells, so they refuse these metrics up
+front (`_reject_cell_metrics`) rather than silently dropping them. Select them with
+`--profile cell`, or by name.
+
+**Everything in this section is unscored (`DIAG`) and reaches no shipped profile**, so
+`rule_version`, `competition_digest()` and every `avg_score` are untouched. That is the §6a
+ruling, not an oversight: the one earlier family that would have graded emission realism was
+measured at a **+2.0% ceiling against the mean's +14.5%** and rejected on that basis, and the
+ruling was that anything grading emission realism has to make its case on its own evidence.
+So these ship as diagnostics, and their split-half ceiling and generic-response baseline on
+the three official validation contexts are what an enrolment discussion starts from.
+
+### 8.1 Shared preprocessing (`cells_prep.py`)
+
+| step | definition | why it is fixed here |
+|---|---|---|
+| lognorm | $\log\!\left(1 + 10^4\, x_{cg} / l_c\right)$ per cell, $l_c$ the **full-panel** library size | CP10K. ⚠️ **Not** the run's `bulk_lognorm` comparator and it reads neither `target_sum` nor `bulk_target_sum` — that comparator is a per-*group* pseudobulk space (§1.2) and these metrics are about *cells* |
+| scored genes $G_p$ | every gene, **minus** this perturbation's own target gene, **minus** genes with zero counts in *both* the real control and real $p$ | Target-gene exclusion goes through `distances.resolve_exclusion_columns` at **panel** scope — the one definition shared with `pds_*` and the eleven chance-corrected DE metrics, so a run has a single notion of "the target gene" and a zero-resolve construct-ID panel raises here exactly as it does there |
+| depth | both sides cut to $n = \min(n_{\text{real}}, n_{\text{pred}}, \texttt{max\_cells})$, $\texttt{max\_cells}=500$, seeded per $(\text{seed}, \text{perturbation})$ | **Equal** depth is load-bearing. Each metric compares two quantities *estimated from cells*, and such an estimate's sampling noise is a function of $n$ — a pred side with 4× the real side's cells would produce a systematically tighter correlation matrix for reasons that have nothing to do with the model. Keying the seed on the perturbation (not one advancing generator) means adding a perturbation to a panel cannot move another one's value |
+
+Input must be **counts**: a `lognorm` pair is refused with a clear error, never `expm1`'d
+back, because a per-cell library size cannot be recovered from an already-normalized matrix.
+With `validate_input` on, every block of cells these metrics read passes the same checks the
+in-memory path runs on a whole matrix (negative values, fractional counts outside
+`allow_fractional_counts`, `max_counts_per_cell`) — on the archive path the only validation
+those cells get.
+
+### 8.2 `cell_cov_corr`, `cell_cov_eig_ratio` — responding-gene covariance (B4)
+
+**Gene set.** Within $G_p$, the $100$ genes with the largest $|\log_2 \text{FC}_{\text{real}}|$
+— CP10K pseudobulk with pseudocount $1$, computed on the **real** side only, so the scored
+gene set cannot be chosen by the submission — among genes that at least $10$ real cells of
+$p$ express. The expression filter runs *before* the ranking: on a CP10K pseudobulk with a
+pseudocount, a gene seen in three cells can carry a large fold change, and a correlation
+estimated across cells that are almost all zero is noise with a defined value. Ties break by
+column index, so the set is a function of the data and not of the panel's row order.
+
+**The two numbers.** With $R_{\text{real}}$ and $R_{\text{pred}}$ the gene–gene Pearson
+correlation matrices over those genes, on lognorm cells of $p$ at equal depth:
+
+$$\texttt{cell\_cov\_corr}_p = \operatorname{Pearson}\big(\operatorname{triu}(R_{\text{real}}),\ \operatorname{triu}(R_{\text{pred}})\big), \qquad \texttt{cell\_cov\_eig\_ratio}_p = \frac{\lambda_1(R_{\text{pred}})}{\lambda_1(R_{\text{real}})}$$
+
+| | range | ideal | reads |
+|---|---|---|---|
+| `cell_cov_corr` | $[-1,1]$ | $1$ | whether the co-expression structure is the **right** structure |
+| `cell_cov_eig_ratio` | $[0,\infty)$ | $1$ | **how much** shared structure there is — the dominant-program strength |
+
+⚠️ **Read them together.** `cell_cov_eig_ratio` is a ratio of magnitudes and says nothing
+about agreement: a prediction whose dominant program is as strong as the real one but points
+somewhere else reads $1.0$ there and $\approx 0$ on `cell_cov_corr`. Below $1$ means the
+prediction's responding genes are more independent than the real ones — which is what
+independent per-gene sampling from a well-fitted marginal produces. `cell_cov_eig_ratio` has
+no coherent `direction` (its ideal $1$ is not an extremum); `cell_cov_corr`'s ideal is its
+maximum, so higher is better, and it stays unscored on the §6a evidence rule alone.
+
+**Measured, on the toy fixture** (`tests/test_cell_cov_metrics.py`). Two predictions with
+the *same* per-gene marginals, one carrying the real shared-latent structure among the
+responding genes and one with every gene independent:
+
+| prediction | `expr_mae` (pseudobulk) | `cell_cov_corr` | `cell_cov_eig_ratio` |
+|---|---|---|---|
+| structure matched | $0.256$ | $0.97$ | $0.98$ |
+| genes independent | $0.129$ | $-0.02$ | $0.05$ |
+
+The pseudobulk metric does not penalise the structure-free prediction — on this draw it scores
+it better: one latent per cell moves every responding gene together, so the matched
+prediction's pseudobulk errors are correlated across genes and its `expr_mae` swings more from
+draw to draw — while the covariance metric goes from $0.97$ to $0$. That gap is the whole
+argument for the family.
+
+**Omissions, not fills.** A perturbation is omitted when a side has fewer than $50$ cells at
+the common depth, or when fewer than $20$ genes survive the responding-gene filters and the
+constant-column drop. `agg="mean"` skips a missing key, and both metrics are unscored, so an
+omission costs no score — while a filled-in number would be a correlation the data cannot
+support. A gene with no variance in the cells actually drawn is dropped after sampling (with
+a tolerance, not an exact-zero test: the blocks are float32, and a bit-identical column's
+variance rounds to $2.4\times10^{-7}$, not $0$) and the gene floor is re-applied.
+
+**Related to, and deliberately not merged with, `dispersion`** (proposed in #385, not part of
+this release). Both concern within-perturbation
+cell structure and they measure different halves of it: `dispersion` measures the **spread**
+of a perturbation's cells in PC space against its own control (one scalar per side — is the
+cloud wider), B4 measures the **shape** of the co-expression among responding genes against
+the other side (a $[k,k]$ matrix per side — does gene $i$ move with gene $j$). A prediction
+can match the real spread exactly with every gene independent, and it can get the covariance
+right at the wrong overall scale.
+
+**⚠️ The knobs are function defaults, not `EvalConfig` fields.** #386 §5.2 asks for a
+`CellsParams` dataclass that "enters the config digest"; that is **not implementable as
+specified** and the constraint in §1 is the one that wins. `cache.config_hash` digests every
+non-skipped `EvalConfig` field, `competition.rule_config_hash` *is* that hash, and
+`competition_payload()` embeds it — so adding a `cells:` section moves `competition_digest()`
+(measured: it does) and breaks the frozen digest that certifies two real bundles as mutually
+comparable. An unscored diagnostic must not be able to do that. The knobs therefore sit as
+`cov_metric` / `cov_ccc_metric` defaults bound in the catalog, and the result cache keys on
+their values, so a changed binding never serves an old result. Lifting them to the config
+belongs in a release that bumps the rule deliberately.
+
+### 8.3 `cell_cov_ccc` — whole-transcriptome co-expression concordance
+
+**Gene set and cells.** Every gene, on the equal-depth lognorm cells of §8.1. Unlike §8.2 there
+is no responding-gene selection and no target-gene exclusion: over ~18k genes one gene is
+negligible, and the metric needs no `target_gene_map`. A gene with no variance in the cells
+drawn on either side drops out (the §8.2 tolerance, on an SD taken in float64).
+
+**The number.** With $R_{\text{real}}$ and $R_{\text{pred}}$ the $G\times G$ gene–gene Pearson
+correlation matrices, and $S$ the gene pairs $i<j$ correlated significantly on **both** sides —
+$|r| \ge r_{\text{crit}}$, the two-sided $\alpha = 0.05$ Pearson critical value at the common
+depth $n$, with no multiplicity correction:
+
+$$\texttt{cell\_cov\_ccc}_p = \frac{2\,\operatorname{cov}(a, b)}{\operatorname{var}(a) + \operatorname{var}(b) + (\bar a - \bar b)^2}, \qquad a = R_{\text{real}}[S],\ b = R_{\text{pred}}[S]$$
+
+Lin's concordance correlation measures agreement about the identity line, so a prediction whose
+co-expression pattern is right but uniformly weaker — what independent per-gene sampling from a
+fitted marginal produces — loses score, where Pearson (`cell_cov_corr`) would not. Range
+$[-1, 1]$, ideal $1$. Most of a $G^2$ matrix is sampling noise around zero, which is why the
+significance gate is the default; `significance="none"` scores every jointly finite pair.
+
+**Omissions.** A perturbation is omitted below $50$ cells at the common depth, and reads NaN
+(left out of the mean) when fewer than three gene pairs survive the gate — a constant
+prediction, for one.
+
+**Measured.** On the toy fixture of §8.2, the structure-matched prediction reads $0.98$ and the
+genes-independent one $-0.03$ ($0.82$ and $0.00$ ungated). On a 300-target validation context
+(18,533 genes, 400 cells per target), a no-skill prediction built from control cells reads
+$0.70$: much of the co-expression structure is shared with the control.
+
+**Cost.** Per perturbation, two $G \times G$ float32 matrices plus temporaries: about
+$15\,G^2$ bytes of scratch at peak when few pairs pass the gate, rising to about $21\,G^2$ when
+nearly all do (the moments are then taken over $G^2$-sized vectors) — 4.8–6.7 GiB at
+$G = 18{,}533$, 12.6–17.6 GiB at 30,000 genes (measured on CPU). It runs on the GPU when `device` resolves to CUDA (CuPy), on NumPy
+otherwise; on the validation context above the two agreed within $5.3 \times 10^{-6}$ per
+perturbation, and adding the metric to a `full` run cost $+111$–$200$ s on one H100 and
+$+65$ min on 48 CPU cores.
+
+The other Part B members of #386 §4 (`cell_edist_norm`, `cell_axis_*`, `cell_c2st_auc`,
+`cell_dv_*`, `cell_label_mrr`) are not implemented yet; the shared PCA/HVG step they need is
+not in `cells_prep.py`, which carries only the three steps §8.1 lists.
 
 ---
 
 *Sources: `src/cell_eval2/metrics/{delta,de,discrimination}.py`, `distances.py`, `prep.py`,
-`norm.py`, `catalog.py`, `compat/`.*
+`norm.py`, `catalog.py`, `compat/`, `cells_prep.py`, `metrics/cells.py`.*

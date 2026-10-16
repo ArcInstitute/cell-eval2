@@ -5,14 +5,19 @@ import logging
 import numpy as np
 from scipy.spatial.distance import cdist
 
+from .config import UNMAPPED, target_gene_entry
+
 logger = logging.getLogger(__name__)
+
+#: `resolve_exclusion_columns`' answer for a label the map declares to have no target gene (#397).
+_DECLARED = object()
 
 
 def resolve_exclusion_columns(
     labels,
     genes,
     *,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
     gate_labels=None,
     who: str = "exclude_target_gene=True",
     escape: str = ("or pass exclude_target_gene=False to score without exclusion "
@@ -35,6 +40,10 @@ def resolve_exclusion_columns(
          hatch (``'ADNP-1'`` -> ``'ADNP'``).
       2. the raw label matched against the gene panel, so gene-level panels whose labels
          ARE symbols keep resolving with no map and no score change.
+
+    A label the map DECLARES to have no target gene (#397: a ``None`` value, or the ``"*"``
+    wildcard -- :func:`cell_eval2.config.target_gene_entry`) is omitted without a report: there
+    is no gene to exclude, it is never matched by name, and it counts as resolved for the gate.
 
     A label that resolves to nothing is omitted and reported. But ZERO resolution raises: that is
     the construct-ID-vs-symbol mismatch, where the caller asked for exclusion, nothing was
@@ -157,10 +166,21 @@ def resolve_exclusion_columns(
         )
     # str-keyed both sides: `genes` may hold np.str_ or object dtype, and a YAML-loaded
     # map may hold anything str()-able. Matching the CPU path's existing str(p) lookup.
-    mapping = {str(k): str(v) for k, v in (target_gene_map or {}).items()}
+    # A `None` value stays None: str() would turn the #397 declaration into a lookup of a gene
+    # named "None".
+    mapping = {str(k): (None if v is None else str(v))
+               for k, v in (target_gene_map or {}).items()}
+
+    def _column(key: str):
+        """``key``'s gene column, None when it resolves to none, ``_DECLARED`` when declared."""
+        entry = target_gene_entry(mapping, key)
+        if entry is None:
+            return _DECLARED
+        return gene_pos.get(key if entry is UNMAPPED else entry)
 
     cols: dict[int, int] = {}
     n_unresolved = 0
+    n_declared = 0
     sample: list[str] = []  # capped: only 5 are ever reported, and a CCL-scale panel
                             # would otherwise build a full-length list to slice [:5] off
     for i, label in enumerate(labels):
@@ -169,8 +189,10 @@ def resolve_exclusion_columns(
         # authoritative-and-done as it is on the DE side: there is no column to drop, so
         # nothing can be excluded. Counting it as resolved would re-open the silent hole
         # for a map that is present but wrong.
-        col = gene_pos.get(mapping.get(key, key))
-        if col is None:
+        col = _column(key)
+        if col is _DECLARED:
+            n_declared += 1
+        elif col is None:
             n_unresolved += 1
             if len(sample) < 5:
                 sample.append(key)
@@ -181,8 +203,11 @@ def resolve_exclusion_columns(
     # Resolving the gate set separately costs one dict lookup per reference label and buys
     # partition-independence: the raise now fires on the construct-ID mismatch and nothing
     # else. When gate_labels is None (or IS labels) this collapses to the counts above.
+    # A DECLARED label (#397) counts as resolved here: a panel of drugs or cytokines has nothing
+    # to exclude, which is not the mismatch the gate exists to catch.
     if gate_labels is None or gate_labels is labels:
-        n_gate_resolved, n_gate, gate_sample = len(cols), len(cols) + n_unresolved, sample
+        n_gate_resolved = len(cols) + n_declared
+        n_gate, gate_sample = n_gate_resolved + n_unresolved, sample
     else:
         n_gate = 0
         n_gate_resolved = 0
@@ -194,7 +219,7 @@ def resolve_exclusion_columns(
         for label in gate_labels:
             n_gate += 1
             key = str(label)
-            if gene_pos.get(mapping.get(key, key)) is not None:
+            if _column(key) is not None:          # a column, or _DECLARED
                 n_gate_resolved += 1
             elif len(gate_sample) < 5:
                 gate_sample.append(key)
@@ -212,7 +237,10 @@ def resolve_exclusion_columns(
             f"that predicts the knockdown, not at all for one with no effect. Unresolved sample: "
             f"{gate_sample}. Supply EvalConfig.target_gene_map={{perturbation: gene}} "
             f"to map construct IDs to their genes (the same map the DE metrics use), "
-            f"{escape}"
+            f"{escape} If these perturbations have no target gene at all (drug doses, added "
+            f"cytokines), declare it instead: a None value in target_gene_map, or "
+            f"{{'*': None}} for every label (the CLI's --no-target-genes), matches no label "
+            f"to a gene and excludes nothing (#397)."
         )
     if n_unresolved:
         # Denominator is THIS call's label count, not the gate set's -- mixing a local
@@ -237,7 +265,8 @@ def resolve_exclusion_columns(
             # `var_names` to check against.
             "and this function cannot tell the two apart. Check them against the gene panel "
             "passed in (an AnnData caller's var_names), and "
-            "supply EvalConfig.target_gene_map={perturbation: gene} for any that are present. "
+            "supply EvalConfig.target_gene_map={perturbation: gene} for any that are present, "
+            "or {perturbation: None} for any that has no target gene (#397). "
             "Unresolved sample: %s",
             len(cols), len(cols) + n_unresolved, n_unresolved, sample,
         )
@@ -248,7 +277,7 @@ def resolve_panel_columns(
     panel_labels,
     genes,
     *,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
     who: str = "exclude_target_gene=True with exclusion_scope='panel'",
     escape: str = ("or pass exclude_target_gene=False to score without exclusion "
                    "deliberately."),
@@ -290,14 +319,18 @@ def panel_reduced(
     it is reachable on a small research panel whose perturbations cover the measured genes,
     never on the competition panel (300 targets, 18,533 genes).
 
-    ``panel_cols`` is non-empty by contract: the only caller resolves it through
-    :func:`resolve_panel_columns`, whose zero-resolve gate RAISES before this function is
-    reached. It is therefore deliberately not special-cased -- an empty ``panel_cols`` would
-    make the mask all-True and return an ordinary full-width copy, which is the right answer
-    for a hypothetical direct caller and one no production path can ask for. (Gemini suggested
-    short-circuiting that case to return ``eff`` itself; declined in PR #345 because it is
-    unreachable through the real caller and would make the return value sometimes a view and
-    sometimes a copy, which is the kind of aliasing contract a shared helper should not have.)
+    ``panel_cols`` is empty on one production route: a panel on which no label resolves to a
+    measured gene but some label is DECLARED to have no target gene (#397), which counts as
+    resolved for :func:`resolve_panel_columns`' zero-resolve gate. With nothing declared, an
+    empty panel raises in that gate before this function is reached. Nothing is excluded then,
+    and the result must score exactly as ``exclude_target_gene=False`` does, so it is a copy of
+    ``eff`` in ``eff``'s own memory layout. ⚠️ Not ``eff[:, keep]`` with an all-True mask:
+    MEASURED, that returns an F-ordered copy, BLAS sums an F-ordered operand in a different
+    order, and the l2/cosine distance matrices then differ from the unreduced ones in the last
+    bits, which can reorder a near-tie (codex review, #397). Always a copy, never
+    ``eff`` itself: Gemini suggested returning ``eff`` for this case and it was declined in
+    PR #345, because a return value that is sometimes a view and sometimes a copy is the kind
+    of aliasing contract a shared helper should not have.
     """
     # A boolean mask, not `np.setdiff1d`: O(G) instead of O(G log G), it preserves column
     # order by construction, and it needs NO uniqueness or sortedness precondition on
@@ -317,6 +350,8 @@ def panel_reduced(
             "0.5 for every perturbation regardless of the submission. Score this panel with "
             "exclusion_scope='row', or with exclude_target_gene=False."
         )
+    if keep.all():
+        return eff.copy(order="K")     # nothing removed (#397): keep eff's layout, see above
     return eff[:, keep]
 
 

@@ -9,6 +9,8 @@ from types import MappingProxyType
 
 import polars as pl
 
+from .config import UNMAPPED, target_gene_entry
+
 logger = logging.getLogger(__name__)
 
 REQUIRED_COLS = ("target", "feature", "log2_fold_change", "p_adj")
@@ -50,14 +52,20 @@ class TargetResolution:
     DATASET-GLOBAL. That matters for the error message: a partitioned run would otherwise
     report a global target count against a sliced feature count and a one-target sample,
     which reads as a contradiction.
+
+    `n_declared` counts the targets the map DECLARES to have no target gene (#397). They are
+    neither in `mapping` -- there is no gene to exclude -- nor in `unresolved`, and
+    `require_resolution` counts them as resolved. Keyword-only, so positional callers keep
+    their meaning.
     """
     pairs: tuple[tuple[str, str], ...]
     n_targets: int
     n_features: int | None
     unresolved: tuple[str, ...]
+    n_declared: int
 
     def __init__(self, mapping=None, n_targets=0, n_features=None, unresolved=(),
-                 *, pairs=None):
+                 *, pairs=None, n_declared=0):
         # init=False on the dataclass + an explicit __init__ so callers keep writing
         # TargetResolution({"A": "A"}, 1) while the stored form is the picklable tuple.
         # object.__setattr__ because the dataclass is frozen.
@@ -74,6 +82,7 @@ class TargetResolution:
         object.__setattr__(self, "n_features",
                            None if n_features is None else int(n_features))
         object.__setattr__(self, "unresolved", tuple(unresolved))
+        object.__setattr__(self, "n_declared", int(n_declared))
 
     @property
     def mapping(self) -> Mapping[str, str]:
@@ -90,7 +99,7 @@ def resolve_target_genes(
     real_df: pl.DataFrame,
     targets: list[str],
     *,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
 ) -> TargetResolution:
     """Resolve each target to its own gene's feature label. Spec 2.1.
 
@@ -107,6 +116,12 @@ def resolve_target_genes(
          deliberately-absent gene. The cost is that a fully-mapped run always passes the
          gate, correct map or not -- an explicit override, like `validate_input=False`.
       2. exact match of the target label against the global feature index.
+
+    A target the map DECLARES to have no target gene (#397: a `None` value, or the `"*"`
+    wildcard -- `config.target_gene_entry`, the reading `distances.resolve_exclusion_columns`
+    shares) takes neither step: it is counted in `n_declared`, excludes nothing, and is never
+    matched by name. A cytokine label can be a measured gene's symbol, so step 2 would exclude
+    a gene the perturbation never targeted.
 
     ⚠️ **This function NEVER raises.** Resolution and validation are deliberately
     separate. Every DE run constructs a PreparedDE, including runs that select only the
@@ -126,12 +141,16 @@ def resolve_target_genes(
     """
     features = set(real_df["feature"].unique().to_list()) if real_df.height else set()
     mapping: dict[str, str] = {}
+    declared: set[str] = set()
     for t in targets:
-        if target_gene_map and t in target_gene_map:
-            mapping[t] = target_gene_map[t]
+        entry = target_gene_entry(target_gene_map, t)
+        if entry is None:
+            declared.add(t)
+        elif entry is not UNMAPPED:
+            mapping[t] = entry
         elif t in features:
             mapping[t] = t
-    unresolved = tuple(sorted(t for t in targets if t not in mapping))
+    unresolved = tuple(sorted(t for t in targets if t not in mapping and t not in declared))
     if targets and unresolved:
         logger.info(
             "target-gene resolution: %d/%d targets resolved to a measured gene; the rest "
@@ -142,7 +161,7 @@ def resolve_target_genes(
     # n_features and unresolved are captured HERE, where the table is the unsliced one,
     # so the gate's error message stays dataset-global on a partitioned run.
     return TargetResolution(mapping, len(targets), n_features=len(features),
-                            unresolved=unresolved[:5])
+                            unresolved=unresolved[:5], n_declared=len(declared))
 
 
 def on_target_pairs(resolution: TargetResolution) -> pl.DataFrame:
@@ -176,6 +195,11 @@ def exclude_on_target(df: pl.DataFrame, resolution: TargetResolution) -> pl.Data
 def require_resolution(perturbations, resolution: TargetResolution) -> None:
     """The zero-resolve gate (spec 2.1/5). Raises when NO target resolved.
 
+    A target DECLARED to have no target gene (#397, ``resolution.n_declared``) counts as
+    resolved: a panel of drugs or cytokines has nothing to exclude, which is not the mismatch
+    this gate exists to catch. A panel where nothing resolves and nothing is declared still
+    raises.
+
     ⚠️ Enforced at the ENTRY OF EACH EXCLUDING METRIC, and NOT in
     :func:`resolve_target_genes` or the :class:`PreparedDE` constructors. Two reasons, and
     both are failure modes rather than preferences:
@@ -201,7 +225,7 @@ def require_resolution(perturbations, resolution: TargetResolution) -> None:
     authoritative target list on the object; ``n_targets`` is advisory metadata a caller can
     get wrong.
     """
-    if not perturbations or resolution.n_resolved:
+    if not perturbations or resolution.n_resolved or resolution.n_declared:
         return
     # Dataset-global figures, recorded at resolution time -- NOT recomputed from a sliced
     # real_df, which would make the message report a global target count against a piece's
@@ -220,7 +244,10 @@ def require_resolution(perturbations, resolution: TargetResolution) -> None:
         f"wrong number -- the worst failure mode available to these metrics. "
         f"Unresolved sample: {sample}. Supply "
         f"EvalConfig.target_gene_map={{target: feature}} to override; map entries are "
-        f"authoritative and are not re-checked against the index."
+        f"authoritative and are not re-checked against the index. If these perturbations "
+        f"have no target gene at all (drug doses, added cytokines), declare it instead: a "
+        f"None value in target_gene_map, or {{'*': None}} for every target (the CLI's "
+        f"--no-target-genes), counts the target as resolved and excludes nothing (#397)."
     )
 
 

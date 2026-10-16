@@ -1,0 +1,214 @@
+# Classification of every cell_eval2 EvalConfig field for the ground-truth DEG cache key
+# (docs/ground_truth_cache.md §5.2 / Phase 0). Classified against cell-eval2 0.17.0 @ 519736fa
+# by reading the real-DE path that `score_cellstream` runs:
+#   partition_inmem._build_reference_streaming_core -> de_compute.compute_de (gpudge) ->
+#   _finalize_gpudge_de -> _write_reference_bundle (writes compute_de's output verbatim).
+# A field is `included` when it reaches that path (or is a manual guard the spec demands),
+# `folded` when its only effect is already captured by a RESOLVED included value, `excluded`
+# when nothing on that path reads it, `prohibited` when the cache-eligible path requires one
+# fixed value (the builder must assert it), and `container` for nested dataclasses.
+# `tests/test_ground_truth_cache_classification.py` checks this file covers every field.
+schema: 1
+classified_against:
+  package: cell-eval2
+  version: "0.17.0"
+  commit: 519736fa886e0dad67a13fc0d1910db34ba09672
+  real_de_path:
+    - cell_eval2.cellstream.score_cellstream
+    - cell_eval2.partition_inmem._build_reference_streaming_core
+    - cell_eval2.de_compute.compute_de
+    - cell_eval2.de_compute._finalize_gpudge_de
+    - cell_eval2.partition_inmem._write_reference_bundle
+classes:
+  included: "enters the §9.1 semantic document (as the RESOLVED value when resolved is true)"
+  folded: "no direct entry; its whole effect on real DE is captured by the named included key"
+  excluded: "cannot change de_real.parquet (reason given); must NOT enter the key"
+  prohibited: "the cache-eligible path requires the fixed required_value; the builder asserts it"
+  container: "nested dataclass; its children are classified individually"
+fields:
+  metrics:
+    class: excluded
+    reason: selects metrics and which pseudobulk normalizations are accumulated; compute_de never reads it
+  pert_col:
+    class: included
+    semantic_key: pert_col
+    resolved: true
+    reason: defines the target populations; score_cellstream remaps "target" -> "perturbation", so the resolved column name is keyed
+  control:
+    class: included
+    semantic_key: control
+    resolved: true
+    reason: defines the reference population; cellstream._control_label prefers the archive's uniform control_value column over cfg.control, so the RESOLVED label is keyed
+  version:
+    class: included
+    semantic_key: config_version
+    resolved: false
+    reason: does not reach compute_de directly, but drives real-side input-type autodetection (v1) and is the spec's conservative compatibility guard
+  control_source:
+    class: excluded
+    reason: real DE is always computed against the REAL control block; control_source only decides which control the PRED DE uses, and pred-control artifacts are per-run temporary storage that is never cached (§7.3). Note cell_eval2's BUNDLE_SEMANTIC_FIELDS includes it because the temp bundle also holds pred artifacts; the shared cache holds only de_real.parquet
+  input_type:
+    class: included
+    semantic_key: input_type
+    resolved: true
+    reason: passed to compute_de as the EFFECTIVE type after run._effective_input_type on the real control block (v1 autodetects); the resolved value is keyed
+  max_counts_per_cell:
+    class: included
+    semantic_key: max_counts_per_cell
+    resolved: false
+    reason: scale-limit gate in _validate_stream_slice; changes accepted input (validation contract, §9.2)
+  target_sum:
+    class: included
+    semantic_key: target_sum
+    resolved: true
+    reason: passed to compute_de after norm.resolve_target_sum on the real control block (a number for counts, incl. the data-derived median when None; null when not applicable)
+  allow_discrete:
+    class: folded
+    into: input_type
+    reason: norm.resolve_input_type short-circuits to "counts" when set; the outcome is the resolved input_type
+  allow_fractional_counts:
+    class: excluded
+    reason: run._val_allow_fractional applies it to the PRED side only; the real side is always validated strictly, so the §9.1 key `allow_fractional_real` is the constant false and this field cannot change it
+  autodetect_input_type:
+    class: folded
+    into: input_type
+    reason: only alters input-type resolution; the resolved real-side input_type captures the outcome
+  validate_input:
+    class: included
+    semantic_key: validate_input
+    resolved: false
+    reason: gates _validate_stream_slice entirely; changes accepted input (validation contract, §9.2)
+  filter:
+    class: container
+  filter.filter_gene_min_cpm_cell:
+    class: included
+    semantic_key: filter_gene_min_cpm_cell
+    resolved: false
+    reason: the pre-DE reference-only CPM gate inside _finalize_gpudge_de; changes which (target, feature) rows exist and their per-target BH p_adj
+  num_threads:
+    class: excluded
+    reason: only pdex/scanpy p-value backends receive `threads`; de_compute._de_gpudge passes no thread count to gpudge, and those CPU backends are prohibited on this path
+  device:
+    class: included
+    semantic_key: device
+    resolved: true
+    reason: the resolved numerical execution class (run._cache_device); on the score_cellstream path it is always cuda (gpudge)
+  pert_chunk:
+    class: excluded
+    reason: GPU discrimination (PDS) row blocking only
+  outdir:
+    class: excluded
+    reason: output location; already in cache.config_hash's skip set
+  cache_real:
+    class: excluded
+    reason: cache location/policy is operational, not scientific (§9.2)
+  cache_pred:
+    class: excluded
+    reason: cache location/policy is operational, not scientific (§9.2)
+  cache_strict:
+    class: excluded
+    reason: only changes the legacy cache.fingerprint_adata strictness for the temp bundle's real_ref_fingerprint; never touches DE values
+  discrimination:
+    class: container
+  discrimination.distance:
+    class: excluded
+    reason: PDS only
+  discrimination.rank_denominator:
+    class: excluded
+    reason: PDS only
+  discrimination.exclude_target_gene:
+    class: excluded
+    reason: PDS only (target-gene exclusion happens after the DE table is loaded)
+  discrimination.embed_key:
+    class: excluded
+    reason: PDS only (obsm-space PDS)
+  discrimination.tie_policy:
+    class: excluded
+    reason: PDS only
+  discrimination.exclusion_scope:
+    class: excluded
+    reason: PDS only
+  de:
+    class: container
+  de.p_adj_threshold:
+    class: excluded
+    reason: significance gate applied downstream in score_piece / PreparedDE, after the unthresholded table is produced (§9.2)
+  de.min_abs_log2fc:
+    class: excluded
+    reason: post-FDR effect-size floor applied downstream (de.apply_min_abs_log2fc from PreparedDE), not in compute_de
+  de.sort_by:
+    class: excluded
+    reason: downstream ranking only
+  de.method:
+    class: folded
+    into: de_backend
+    reason: DEParams.__post_init__ derives it from `backend` (deseq2 -> deseq2, else wilcoxon); the resolved backend carries it
+  de.nan_lfc_policy:
+    class: excluded
+    reason: applied in score_piece (partition_inmem.py:1183) on the loaded table, never in compute_de / _write_reference_bundle; the cached table is pre-policy
+  de.backend:
+    class: included
+    semantic_key: de_backend
+    resolved: true
+    reason: the resolved backend (de_compute._resolve_backend). _require_partition_config requires it to resolve to gpudge on this path; deseq2 is a NotImplementedError there
+  de.replicate_col:
+    class: prohibited
+    required_value: null
+    reason: deseq2-only (pseudobulk replicates); the deseq2 backend cannot run on the partition/cellstream path
+  de.mean_calc:
+    class: included
+    semantic_key: mean_calc
+    resolved: false
+    reason: passed to compute_de; arithmetic vs geometric group means change log2_fold_change
+  de.epsilon:
+    class: included
+    semantic_key: epsilon
+    resolved: false
+    reason: passed to compute_de; LFC pseudocount
+  de.clip_value:
+    class: included
+    semantic_key: clip_value
+    resolved: false
+    reason: passed to compute_de; v1 zero-mean LFC clip recomputed in _finalize_gpudge_de
+  de.fdr_scope:
+    class: included
+    semantic_key: fdr_scope
+    resolved: false
+    reason: passed to compute_de; changes p_adj. _require_partition_config forces per_pert on this path, so it is a constant here, kept for cross-path safety
+  de.auc_pval_floor:
+    class: excluded
+    reason: AUC metric floor applied downstream; _require_partition_config even rewrites it (min_nonzero -> preserve) without touching DE
+  de.auc_pval_floor_value:
+    class: excluded
+    reason: AUC metric floor applied downstream
+  gather_threads:
+    class: excluded
+    reason: cellstream decode parallelism (row gathers); values are identical regardless of thread count
+  target_gene_map:
+    class: excluded
+    reason: target-gene resolution for PDS/direction metrics, computed from the loaded real_de (_RefBundle.target_resolution) after the table exists (§9.2)
+  bulk_target_sum:
+    class: excluded
+    reason: bulk_lognorm comparator target for pseudobulk expression metrics; compute_de never reads it
+# §9.1 keys that are NOT EvalConfig fields. Each must be produced by the builder from the
+# named source. `precision` (approved 2026-09-16) is the dtype in which the DE backend consumes
+# expression values -- "float32" for gpudge, which ranks float32 values on the GPU; its float64
+# accumulators are an implementation detail already pinned by `gpudge_version`.
+non_config_inputs:
+  cache_format_version: {source: constant 1}
+  real_de_semantics_version: {source: manual guard; bump on any change to real-DE rows/values/dtypes/ordering}
+  cell_eval2_version: {source: importlib.metadata.version("cell-eval2")}
+  gpudge_version: {source: importlib.metadata.version("gpudge")}
+  cellstream_decoder_version: {source: importlib.metadata.version("cellstream") (or shardad on pre-rename images)}
+  allow_fractional_real: {source: constant false (run._val_allow_fractional always returns False for side="real")}
+  native_gpu_normalize: {source: constant true on the score_cellstream path (cellstream.py passes native_gpu_normalize=True)}
+  precision: {source: dtype of the expression values handed to the DE backend ("float32" for gpudge); approved 2026-09-16}
+# Inputs outside EvalConfig that must NOT enter the key, with the verification they need.
+non_key_inputs:
+  mem_budget:
+    reason: batch plan only (h5ad_manifest.plan_pert_batches); per-pert FDR and the reference-only CPM gate are batch-independent
+    verify: row order and content of de_real.parquet must be identical across host budgets (Phase 0 baseline stage A runs at 64 and 16 GiB)
+  archive_path_and_location:
+    reason: identity comes from payload_sha256 + axes (§8.4), never from paths, inodes or mtimes
+  context:
+    reason: score_cellstream scores the whole archive (context=None); the archive identity already covers it

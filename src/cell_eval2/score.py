@@ -391,7 +391,7 @@ def expect_from_run_meta(meta: dict) -> AnchorExpect:
                         metrics=tuple(meta["anchor_metric_names"]))
 
 
-def _replicate_entries(base_by_name, anchor_frame):
+def _replicate_entries(base_by_name, anchor_frame, exclude=frozenset()):
     """The replicate scale as `(base, Scoring)` pairs: 0 = baseline, 1 = replicate.
 
     #276 comment 1 fixes the scale; part C makes it POLICY-APPLIED. `score_one` with
@@ -426,6 +426,13 @@ def _replicate_entries(base_by_name, anchor_frame):
                 "last."
             )
         seen[canon] = name
+        if canon in exclude:
+            # #391: the baseline pass already left this metric out of avg_score -- its
+            # reference-only gate admits no perturbation -- so there is no baseline end to build
+            # a replicate scale on. Refusing here would undo that exclusion one step later.
+            logger.warning("metric %r is left off the replicate scale too: its reference-only "
+                           "gate admits no perturbation (issue #391)", name)
+            continue
         spec = CATALOG.get(canon)
         if spec is None:
             logger.warning("the anchor names metric %r, which is not in the catalog; "
@@ -565,6 +572,13 @@ def score_metrics(
     that competition average's denominator. If the exclusions leave NOTHING scoreable it raises,
     rather than returning the
     fallback ``avg_score = 0.0``, which reads as "equals the baseline".
+
+    One exception, for a GATED metric (#391): a non-finite MEAN aggregate on BOTH sides, in the
+    v2 spelling, means its reference-only gate admitted no perturbation -- a property of the
+    shared reference, not a degenerate baseline. Such a metric is excluded from ``avg_score``
+    with a warning whatever ``comparison_statistic`` is, and is left off a replicate scale too.
+    An empty cohort on ONE side only means the two frames were computed against different
+    references or settings, and is refused.
 
     ``penalty_exponent`` / ``penalty_cap`` / ``clamp_low`` / ``clamp_high`` / ``penalty``
     are global overrides; ``None`` means "not supplied at this level", which is what makes
@@ -720,6 +734,26 @@ def score_metrics(
         metrics_zero, scores_zero = [], []
         metrics_one, scores_one = [], []
         skipped: list[str] = []
+        # #391: the gated metrics whose reference admitted nothing, on BOTH sides -- the same
+        # predicate `_degenerate_metrics` applies (a non-finite MEAN row that is present, in the
+        # v2 spelling). Computed before the loop, so it does not depend on a scoring override: the
+        # replicate scale below must skip such a metric even if the baseline pass never scored it.
+        from .baseline import _empty_cohort_metrics
+
+        empty_user = _empty_cohort_metrics(results_user)
+        empty_base = _empty_cohort_metrics(results_base)
+        # The gate reads the reference alone, so a cohort empty on ONE side only means the two
+        # frames were computed against different references or settings -- refused whatever
+        # statistic is compared, since `count`/`null_count` stay finite and would hide it
+        # (Copilot, PR #401).
+        if one_sided := sorted((empty_user ^ empty_base) & set(metric_names)):
+            raise ValueError(
+                f"gated metric(s) {one_sided} admit no perturbation on one side only -- an empty "
+                "cohort in the submission or the baseline but not both. The gate reads the "
+                "reference alone, so the two were computed against different references or "
+                "settings; fix the pairing rather than scoring across it (issue #391)."
+            )
+        ref_unscoreable = empty_user & empty_base
         for name, uv, bv in zip(metric_names, u_vals, b_vals):
             spec = CATALOG.get(_NAME_TO_CANONICAL.get(name, name))
             if spec is None:
@@ -744,6 +778,26 @@ def score_metrics(
             eff_cap = None if has_override else penalty_cap
             if not policy.scored:
                 logger.warning("metric %r not scored (scored=False)", name)
+                continue
+            # #391 (spec §10.4). A GATED metric that is non-finite on BOTH sides has no
+            # perturbation its reference-only gate admits: a property of the shared reference,
+            # not a corrupt baseline, so it leaves avg_score with a warning instead of raising. A
+            # non-finite baseline beside a FINITE submission is not that -- the two cannot
+            # disagree over one reference -- so it falls through to the degenerate-baseline
+            # branch below unchanged, which is what a corrupt or mispaired baseline looks like.
+            # The cohort must be EMPTY on both sides (`ref_unscoreable`, which also requires the
+            # v2 spelling -- the gate runs under v2 alone), not merely the compared statistic
+            # undefined: a NaN std beside a finite mean is one admitted perturbation. Once it is
+            # empty, the metric leaves avg_score WHATEVER statistic is compared -- `count` and
+            # `null_count` stay finite over an all-NaN column (Copilot, PR #401).
+            if name in ref_unscoreable:
+                logger.warning(
+                    "metric %r has no perturbation its reference-only gate admits (aggregate "
+                    "%r on the submission, %r on the baseline); EXCLUDING it from avg_score. "
+                    "The gate reads the reference alone, so this holds for every submission "
+                    "scored against it (issue #391).", name, uv, bv,
+                )
+                skipped.append(name)
                 continue
             # The SAME knobs `score_one` is called with below. `is_degenerate` self-resolves
             # when they are omitted, which would let the predicate and the scorer disagree
@@ -912,7 +966,7 @@ def score_metrics(
             anchor_expect, supplied=anchor,
             cached=_cached_bundle(anchor_cache) if anchor is None else None)
         digest = anchor_digest(frame, ameta)
-        entries = _replicate_entries(base_by_name, frame)
+        entries = _replicate_entries(base_by_name, frame, exclude=ref_unscoreable)
         # Rows the BASELINE pass declined to score, but the anchor names anyway -- exactly the
         # restoration a requested scale gets. Without it a metric present in the aggregate but
         # absent from the output (an `overrides={m: Scoring(scored=False)}`, or a non-decisive

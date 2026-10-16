@@ -1,4 +1,5 @@
 import json
+import math
 
 import polars as pl
 
@@ -15,20 +16,24 @@ def _write_partial(d, pid, rows, perts, ref="R", cfg="C"):
 
 
 def test_nsig_spearman_reconstructed_across_pieces(tmp_path):
-    # Two disjoint pieces; counts chosen so the global Spearman is a clean value.
-    _write_partial(tmp_path, "p0",
-        [{"perturbation": "A", "metric": "de_wilcoxon_nsig_counts_real", "value": 10.0},
-         {"perturbation": "A", "metric": "de_wilcoxon_nsig_counts_pred", "value": 8.0}],
-        ["A"])
-    _write_partial(tmp_path, "p1",
-        [{"perturbation": "B", "metric": "de_wilcoxon_nsig_counts_real", "value": 20.0},
-         {"perturbation": "B", "metric": "de_wilcoxon_nsig_counts_pred", "value": 25.0}],
-        ["B"])
+    # Two disjoint pieces of six targets; counts chosen so the global Spearman is a clean value.
+    # Twelve targets, not two: #391's gate needs at least 10 targets with a reference-significant
+    # gene before the correlation means anything (`test_real_gate_partition.py` covers below it).
+    targets = [chr(ord("A") + i) for i in range(12)]
+    for pid, chunk in (("p0", targets[:6]), ("p1", targets[6:])):
+        rows = []
+        for t in chunk:
+            i = targets.index(t)
+            rows += [{"perturbation": t, "metric": "de_wilcoxon_nsig_counts_real",
+                      "value": 10.0 + i},
+                     {"perturbation": t, "metric": "de_wilcoxon_nsig_counts_pred",
+                      "value": 8.0 + 2 * i}]
+        _write_partial(tmp_path, pid, rows, chunk)
     full, agg = partition.aggregate_partials(
-        str(tmp_path), reference_universe=["A", "B"], reduce_nsig_spearman=True)
+        str(tmp_path), reference_universe=targets, reduce_nsig_spearman=True)
     sp = full.filter(pl.col("metric") == "de_wilcoxon_nsig_spearman")
-    assert sorted(sp["perturbation"].to_list()) == ["A", "B"]   # broadcast to all
-    assert sp["value"].to_list() == [1.0, 1.0]                  # (10,8),(20,25) both ascending -> +1
+    assert sorted(sp["perturbation"].to_list()) == targets      # broadcast to all
+    assert sp["value"].to_list() == [1.0] * 12                  # both ascending -> +1
 
 
 def test_coverage_gap_raises(tmp_path):
@@ -39,11 +44,12 @@ def test_coverage_gap_raises(tmp_path):
         partition.aggregate_partials(str(tmp_path), reference_universe=["A", "B"])
 
 
-def test_nsig_spearman_undefined_fills_worst_value(tmp_path):
-    # Only ONE target has a real-significant gene -> Spearman over a single point is undefined
-    # (NaN). The v2 no-droppable-NaN policy fills it with the catalog worst_value (-1.0),
-    # matching compute_metrics' run._fill_no_drop. Regression: previously left NaN, which
-    # diverged from whole-prediction scoring (exposed by the h5ad-manifest streamed-vs-whole parity test).
+def test_nsig_spearman_the_reference_cannot_define_is_not_scored(tmp_path):
+    # Only ONE target has a real-significant gene -> Spearman over a single point is undefined,
+    # and it is the REFERENCE that makes it so. Since #391 that is not scored: NaN, exactly as
+    # compute_metrics' gated dispatch emits it (the two share `real_gate.count_corr_decision`).
+    # History: before #391 this filled the catalog worst_value (-1.0), and before THAT it was
+    # left NaN by accident, which diverged from whole-prediction scoring.
     _write_partial(tmp_path, "p0",
         [{"perturbation": "C", "metric": "de_wilcoxon_nsig_counts_real", "value": 1.0},
          {"perturbation": "C", "metric": "de_wilcoxon_nsig_counts_pred", "value": 0.0}],
@@ -51,7 +57,7 @@ def test_nsig_spearman_undefined_fills_worst_value(tmp_path):
     full, _agg = partition.aggregate_partials(
         str(tmp_path), reference_universe=["C"], reduce_nsig_spearman=True)
     sp = full.filter(pl.col("metric") == "de_wilcoxon_nsig_spearman")
-    assert sp["value"].to_list() == [-1.0]   # worst_value fill, NOT NaN
+    assert sp.height == 1 and math.isnan(sp["value"][0])   # not scored, and not dropped
 
 
 def test_inject_nsig_spearman_v1_names():

@@ -365,6 +365,9 @@ def score_h5ad_manifest(manifest, *, config=None, mem_budget, outdir=None) -> Sc
     # inherit the corrected column below.
     if cfg.pert_col == "target":
         cfg = _replace(cfg, pert_col="perturbation")
+    # Before any h5ad is read (#395): this driver carries no cells.
+    from .run import _refuse_cell_metrics_up_front
+    cfg = _refuse_cell_metrics_up_front(cfg, driver="score_h5ad_manifest (partitioned in-memory)")
 
     arts = read_manifest(manifest)
     per_pert_frames = []

@@ -120,10 +120,12 @@ def _exclusion_cols(labels, genes, *, target_gene_map, gate_labels, who, n_genes
         labels, genes, target_gene_map=target_gene_map, gate_labels=gate_labels,
         # These two keep the zero-resolve error honest for a family that has no
         # `exclude_target_gene` knob: exclusion is part of what the metric IS here, so there is
-        # nothing to unset and the only remedy is the map.
+        # nothing to unset and the only remedy for a gene panel is the map. ("a gene panel":
+        # since #397 the resolver's message goes on to name the declaration a panel with no
+        # target genes takes instead.)
         who=f"{who} excludes each perturbation's own gene (issue #172)",
-        escape=("which is the only way to score this panel: exclusion is part of the metric "
-                "and cannot be switched off."),
+        escape=("which is the only way to score a gene panel here: exclusion is part of the "
+                "metric and cannot be switched off."),
     )
 
 
@@ -894,7 +896,7 @@ def mse_unbiased(
     pert_col: str = "target",
     control: str = "non-targeting",
     genes=None,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
 ) -> dict[str, float]:
     """Sampling-bias-corrected `expr_mse`, averaged over the gene set it SCORES. UNCAPPED — a
     DIAGNOSTIC only.
@@ -969,7 +971,7 @@ def mse_unbiased_capped(
     pert_col: str = "target",
     control: str = "non-targeting",
     genes=None,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
     pred_bulk_full: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict[str, float]:
     """`expr_mse_unbiased` with the prediction's correction BOUNDED twice -- per row by the
@@ -1132,7 +1134,7 @@ def distance_unbiased(
     pert_col: str = "target",
     control: str = "non-targeting",
     genes=None,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
 ) -> dict[str, float]:
     """Sampling-corrected squared distance from each real perturbation to the real control,
     averaged over the gene set it SCORES -- UNBIASED where `C` is, which is the analytic

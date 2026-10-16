@@ -86,6 +86,35 @@ def materialize_cell(path: str | os.PathLike) -> ad.AnnData:
     return read_h5ad(os.fspath(path), n_workers=1)
 
 
+def materialized_x_dtype(store):
+    """The ``X.dtype`` :func:`materialize_cell` produces for this open store, read from the
+    manifest without decoding a value.
+
+    It is NOT the dtype ``store.gather_rows`` returns: gathers are float32 for every integer
+    archive, while the whole-archive reader keeps ``uint32`` when the recorded minimum dtype is
+    not safely castable to float32 (``x_data_dtype_min='uint32'``, i.e. some count above 65,535).
+    So this replays the reader's own ``resolve_plan`` call (cellstream ``cell/reader.py``,
+    ``read_cell_bulk`` with its defaults: ``cast_back=True``, no dtype overrides) rather than
+    restating its rule. Returns None when that call is unavailable -- a caller then has to
+    materialize to learn the dtype.
+    """
+    try:
+        from cellstream.v2.materialize import resolve_plan
+
+        man = store.manifest
+        plan = resolve_plan(
+            {"x_data_dtype_on_disk": man["value_dtype_on_disk"],
+             "x_indices_dtype_on_disk": man["index_dtype_on_disk"],
+             "x_data_dtype_min": man["x_data_dtype_min"],
+             "total_nnz": int(man["total_nnz"]),
+             "n_vars": int(store.n_vars)},
+            container="csr", data_dtype=None, index_dtype=None, allow_lossy=False,
+            cast_back=True, target="cpu")
+        return plan.data_dtype
+    except Exception:  # noqa: BLE001 - an unknown cellstream: fall back to materializing
+        return None
+
+
 def open_cell_store(path: str | os.PathLike):
     """Open a cell-layout archive as a lazy ``cellstream.cell.CellStore`` (reads only).
 

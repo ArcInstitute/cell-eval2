@@ -409,10 +409,11 @@ def anchor_semantic_params(cfg: EvalConfig, real_ad, names) -> dict:
     from .catalog import CATALOG
     from .norm import resolve_comparator
     from .metrics.direction import REACH_PURITY_FLOOR
-    from .run import (_effective_input_type, _GROUPED_SUM_REDUCTION_SEMANTICS,
-                      _grouped_sum_reduction_used, _is_discrimination,
-                      _ONTARGET_EXCLUSION_SEMANTICS, _ontarget_exclusion_used,
-                      _reach_floor_used)
+    from .run import (_CELL_METRIC_SEMANTICS, _cell_metric_params, _effective_input_type,
+                      _GROUPED_SUM_REDUCTION_SEMANTICS, _grouped_sum_reduction_used,
+                      _is_discrimination, _no_drop_policy, _NO_TARGET_GENE_SEMANTICS,
+                      _no_target_gene_declared, _ONTARGET_EXCLUSION_SEMANTICS,
+                      _ontarget_exclusion_used, _REAL_GATE_SEMANTICS, _reach_floor_used)
 
     params = {f: getattr(cfg, f) for f in _SEMANTIC_FIELDS}
     # BOTH sides' effective types, with the SAME roles the split run uses: `_score_one_split`
@@ -460,6 +461,22 @@ def anchor_semantic_params(cfg: EvalConfig, real_ad, names) -> dict:
     if _grouped_sum_reduction_used(comparator=params["comparator"],
                                    de_backend=(cfg.de.backend if is_de else None)):
         params["grouped_sum_reduction_semantics"] = _GROUPED_SUM_REDUCTION_SEMANTICS
+    # #391, the same predicate and payload as `run._result_config_digest`'s term: a frozen anchor
+    # carrying a gated or worst-valued metric was computed under one fill/gate policy, and nothing
+    # else in this dict can see it. None for every `vcc2026` selection -- no member carries a gate
+    # or a worst value -- so the official anchors' identity does not move.
+    no_drop_policy = _no_drop_policy(names, cfg.version, cfg.de.backend)
+    if no_drop_policy is not None:
+        params["no_drop_policy"] = no_drop_policy
+        params["real_gate_semantics"] = _REAL_GATE_SEMANTICS
+    # #395, `run._result_config_digest`'s term of the same name: a cell-kind metric's knobs are
+    # catalog-bound defaults rather than config fields, so a frozen anchor computed under one
+    # binding is otherwise indistinguishable from one computed under another. None for every
+    # shipped profile -- no cell metric in any -- so no existing anchor's identity moves.
+    cell_params = _cell_metric_params(names)
+    if cell_params is not None:
+        params["cell_metric_params"] = cell_params
+        params["cell_metric_semantics"] = _CELL_METRIC_SEMANTICS
     # CONDITIONAL, on the same principle as the DE block below: a knob no selected metric
     # reads cannot move this anchor, and keying on it rejects a legitimate artifact.
     if is_pds:
@@ -470,7 +487,10 @@ def anchor_semantic_params(cfg: EvalConfig, real_ad, names) -> dict:
         # gated here rather than unconditional because the discrimination dispatch is its
         # only consumer.
         params["pert_chunk"] = cfg.pert_chunk
-    if is_pds or is_de or is_ontarget:
+    # A cell-kind selection too (#395): `cell_cov_corr` / `cell_cov_eig_ratio` exclude each
+    # perturbation's own gene through this map. Over-inclusive for `cell_cov_ccc` alone, which
+    # reads no map -- a harmless extra miss -- and no shipped profile selects a cell metric.
+    if is_pds or is_de or is_ontarget or cell_params is not None:
         # ALL THREE families, not just pds_*: `_prepare_de_cached` resolves target genes
         # through this map at run.py:633, which the target-excluding direction members of
         # `vcc2026` then consume, and as of #172 `metrics.delta` resolves through it for the
@@ -479,6 +499,11 @@ def anchor_semantic_params(cfg: EvalConfig, real_ad, names) -> dict:
         # gating it on pds_*/DE alone leaves the same hole for an EXPRESSION-only anchor,
         # which is the one selection where neither of the first two predicates fires.
         params["target_gene_map"] = cfg.target_gene_map
+        if _no_target_gene_declared(cfg):
+            # #397, `run._result_config_digest`'s term of the same name, riding with the map. A
+            # frozen anchor built before #397 from a map with a "*" key read that key as a literal
+            # label, and the map above digests the same either way.
+            params["no_target_gene_semantics"] = _NO_TARGET_GENE_SEMANTICS
     if is_ontarget:
         # A CODE-semantics term, not a config knob -- the one case the "add a field whenever a
         # new config knob can change a value" rule above does not reach. `anchor_cache_params`

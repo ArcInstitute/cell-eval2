@@ -4,6 +4,215 @@ All notable changes to cell_eval2. Releases before 0.0.4 (`v0.0.2`, `v0.0.3`) pr
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-16
+
+### Added
+
+- **Three opt-in, unscored single-cell metrics: `cell_cov_ccc`, `cell_cov_corr` and
+  `cell_cov_eig_ratio` (#386 Part B, B4).** No metric in the shipped profiles looks at how
+  genes co-vary across cells: the `expr_*`, `delta_*` and `pds_*` metrics compare pseudobulks —
+  means — and the DE metrics test one gene at a time. These three compare the gene–gene
+  structure of the real and predicted cells directly.
+  - `cell_cov_ccc` — Lin's concordance correlation between the real and predicted gene–gene
+    correlation matrices over ALL genes, taken over the gene pairs significantly correlated on
+    BOTH sides (`|r| ≥ r_crit` at α = 0.05, uncorrected; `significance="none"` scores every
+    pair). Ideal 1.0. Unlike Pearson it penalises a right but uniformly weaker pattern. No
+    target-gene exclusion, so it needs no `target_gene_map`. Runs on the GPU when `device`
+    resolves to CUDA (CuPy), NumPy otherwise.
+  - `cell_cov_corr` — Pearson correlation between the upper triangles of the real and
+    predicted gene-gene correlation matrices, over each perturbation's 100
+    top-`|log2FC_real|` responding genes. Ideal 1.0; whether the structure is the RIGHT
+    structure.
+  - `cell_cov_eig_ratio` — `λ1(R_pred) / λ1(R_real)` on the same matrices. Ideal 1.0; HOW
+    MUCH shared structure there is. ⚠️ A ratio of magnitudes that says nothing about
+    agreement — read it with `cell_cov_corr`.
+  - All three use CP10K-lognorm cells (NOT the `bulk_lognorm` comparator) at EQUAL depth per
+    perturbation, up to 500 cells per side, seeded per perturbation. A `lognorm` pair is refused
+    rather than `expm1`'d back.
+  - Measured on the toy fixture, two predictions with the same per-gene marginals and opposite
+    gene-gene structure: `expr_mae` does not penalise the structure-free one (0.256 matched,
+    0.129 independent), while `cell_cov_corr` goes 0.97 → −0.02 and `cell_cov_ccc`
+    0.98 → −0.03.
+  - All three are UNSCORED (`DIAG`) and opt-in: they ride only the `cell` profile
+    (`--profile cell`, or select them by name). `full` keeps its 54 names and its
+    `config_digest`; `rule_version`, `competition_digest()` and every `avg_score` are
+    unchanged. Per the `docs/metrics.md` §6a ruling, a family grading emission realism earns
+    enrolment on its own measured ceiling and baseline.
+  - Only `compute_metrics` serves them. With nothing but cell metrics selected on two
+    cell-layout `.shad` paths it reads the sampled cells straight from the archives, without
+    materializing either side. The streaming and partitioned drivers refuse them by name.
+  - Cost of `cell_cov_ccc`, measured on a 300-target, 18,533-gene validation context at 400
+    cells per target: adding it to a `full` run took +111–200 s on one H100 and +65 min on 48
+    CPU cores, with peak RAM up by at most 0.2 GiB. Scratch is about `15–21·G²` bytes per
+    perturbation at peak, depending on how many pairs pass the gate (4.8–6.7 GiB at 18,533
+    genes, 12.6–17.6 GiB at 30,000).
+  - ⚠️ The knobs are catalog-bound function defaults rather than an `EvalConfig` section, so no
+    config digest sees them: #386 §5.2's `CellsParams` would move `competition_digest()`
+    (`competition.rule_config_hash` IS `cache.config_hash`). The result cache keys on their
+    values instead. See `docs/metrics.md` §8.
+  - `build_run_meta` now reads a cell-layout archive's metadata only, with no payload decode,
+    when none of its fields needs `X` (measured: 2.0 s instead of 27.2 s on that pair).
+  - **Contributed by [Chris Carpenter](https://github.com/cachris1) in #395 — thank you.**
+
+- **A supported way to score a panel whose perturbations have no target gene — drug doses,
+  added cytokines (#397).** A `None` value in `EvalConfig.target_gene_map` declares that a label
+  has no target gene, and `{"*": None}` declares it for every label without an entry of its own
+  (in YAML, quote the key: `target_gene_map: {'*': null}`). The new CLI flag
+  `--no-target-genes` adds that wildcard, on every subcommand that builds a config.
+  - A declared label counts as resolved, excludes nothing, and is never matched against the
+    features by name. A cytokine can share its name with a measured gene, so name matching would
+    exclude a gene the perturbation never targeted.
+  - The same at all five places that exclude a target gene: `pds_*` (both `exclusion_scope`s,
+    CPU and GPU), the moments metrics behind `expr_mse_unbiased_capped_norm`, the 13 DE metrics
+    with the zero-resolve gate, the `de_lfc_nmae` reference, and the generic-response baseline.
+    The shared reading is `config.target_gene_entry`.
+  - The zero-resolve checks pass when a label is declared. A panel where nothing resolves and
+    nothing is declared still raises (#248), and the error now names the declaration.
+  - On main, 20 of the 54 `full` names raised on a drug-labelled panel, so `cell-eval2 run` on an
+    `.h5ad` pair could not score one at all; declared, all 54 score.
+  - Gene panels are unchanged, and so is `competition_digest()`: no `EvalConfig` field was added.
+  - The map is recorded as before (`run_params.yaml`, `baseline_meta.json`, `anchor_meta.json`),
+    and any set map takes a run off the competition rule, so a declared run cannot be a
+    `vcc2026` submission.
+  - `target_gene_map["*"]` must be `None`; any other value is refused. Before #397 a `"*"` key
+    was an ordinary label.
+  - A new counter, `run._NO_TARGET_GENE_SEMANTICS` (1), separates the two readings of a map
+    that digests the same before and after #397. Measured without it, on a panel whose labels
+    are measured genes: a result cached before #397 from `{"*": None}` was served unchanged, and
+    43 of its 265 `full` rows differ from what #397 computes. With it, the entry misses and is
+    recomputed. Neither the version string nor `competition_digest()` covers this.
+  - The counter enters the result-cache key and the anchor identity only when the map holds a
+    `None` value, so gene panels' maps, map-less runs and competition runs keep both. A warm
+    result from a per-label `None` map recomputes once, to the same numbers unless a feature is
+    literally named `None`, which the old reading matched. ⚠️ An anchor frozen before #397 whose
+    identity records a map holding `None` no longer validates and must be rebuilt.
+  - It enters `partition.result_semantics` unconditionally (schema 6 → 7), so partials written
+    before #397 cannot be combined with partials written after, whatever the map.
+  - ⚠️ `baseline.config_digest` carries no such term (#314): a baseline built before #397 from a
+    map with a `"*"` key, or from a map holding `None` on a panel with a feature named `None`,
+    must be rebuilt.
+
+- **A ground-truth DE cache for `score_cellstream` (#389, cache half; refs #236).** Two keyword
+  arguments, `ground_truth_cache=<root>` and `ground_truth_cache_policy` (`"readwrite"`, the
+  default, or `"readonly"`), let every prediction scored against the same ground truth reuse one
+  real-DE table instead of recomputing it.
+  - The first run against a real archive that carries a `payload_sha256` checksum computes the
+    table and publishes it under `<root>/ground-truth-deg/v1/`. Later runs with the same archive
+    and real-DE settings read and re-validate it.
+  - Identity is the archive's content checksum plus every setting that can change the table,
+    producer versions included. There is no structural fallback: an archive without a checksum
+    is refused before any DE runs.
+  - A committed entry that fails validation is fatal (`GroundTruthCacheCorruptError`), and is
+    never recomputed over or deleted.
+  - With `write_de=True` the publish carries a sixth file, `ground_truth_de_cache.json`, which
+    records the lookup.
+  - `cell-eval2 cache inspect` validates one entry. `cell-eval2 cache doctor` checks a root's
+    locking and atomic-rename support.
+  - `fingerprint_ground_truth_cell_archive` is exported for archive producers.
+  - With `ground_truth_cache=None` (the default) nothing changes: nothing is fingerprinted,
+    there is no cache I/O, and the run writes the same five outputs. Neither argument is an
+    `EvalConfig` field, so no scoring digest moves. See `docs/ground_truth_cache.md`.
+
+### Changed
+
+- **BREAKING for partitioned PR/ROC AUC only: a tiny predicted p-value no longer ranks below a
+  weaker one (#403).** Partitioned scoring — `score_cellstream`, `score_h5ad_manifest`,
+  `score_rowstore` and the `partition_inmem` entry points under them — cannot take
+  `min_nonzero`'s whole-table minimum, so it computed `replace_zero` at `1e-10` in its place. That
+  policy's float32 round-trip turns any p-value below about `7e-46`, exact zeros included, into
+  `1e-10`, so a prediction at `1e-100` ranked below a weaker one at `1e-20`.
+  - New policy `de.auc_pval_floor: preserve`: p-values cast to float64 and floored only at the
+    smallest positive float64 (`np.nextafter(0.0, 1.0)`). Partitioned scoring now computes it
+    wherever the config says `min_nonzero`; `preserve`, `clip` and `replace_zero` pass through
+    unchanged.
+  - Whole-table scoring and every default are unchanged: `min_nonzero` stays the v2 default
+    (`DEParams`, `configs/v2.yaml`, `de_pr_auc`/`de_roc_auc`), and `preserve` is opt-in there.
+    `competition_digest()`, the official bundles' identities and every default-v2
+    `config_digest` are unchanged.
+  - On gpudge's Float64 tables the two paths now differ only in what an exact-zero predicted
+    p-value becomes. Whole-table `min_nonzero` gives it the table's smallest positive p-value (a
+    missing or NaN prediction counts as 1), so the two tie wherever they share a perturbation;
+    partitioned `preserve` gives it the smallest positive float64, which ranks it above every
+    p-value larger than that floor. On the partitioned path the config still says `min_nonzero`.
+  - To reproduce older partitioned numbers, set `de.auc_pval_floor: replace_zero` and
+    `de.auc_pval_floor_value: 1e-10` explicitly. Recompute partitioned AUC baselines and
+    ceilings; the `baseline` and `ceiling` builders score whole-table and are unaffected.
+  - A `score_piece` partial records the normalized config's `config_hash`, so one written under
+    `min_nonzero` before this change cannot be combined with a new one: `aggregate_partials`
+    refuses the mix. Reference bundles hold no AUC, so this change does not invalidate them.
+  - **Contributed by [@abhinadduri](https://github.com/abhinadduri) (Abhinav Adduri) in #403 —
+    thank you.** Landed with `min_nonzero` kept as the v2 default, so no identity moves.
+
+- **BREAKING (v2 `full` and `de`, and `minimal`/`anndata` through `delta_pearson`): a
+  perturbation the reference cannot score is no longer scored (#391).** The v2 no-drop fill
+  gave every omitted or NaN perturbation the metric's worst value, whoever caused it, so a
+  reference with no significant genes charged every submission −1.0 or 0.0 for a perturbation
+  nothing could have scored.
+  - Sixteen metrics, and their `de_deseq2_*` mirrors, now carry a gate computed from the
+    reference alone, never from the prediction: `lfc_spearman` (+ `_pos`, `_neg`),
+    `sig_recall`, `direction_match`, `pr_auc`, `roc_auc`, `direction_sensitivity`
+    (+ `_universe`), `nsig_spearman`, `delta_pearson`, the chance-corrected
+    `sig_recall_adjusted`, `sig_mcc` and `overlap_adjusted`, and the prediction-conditioned
+    `direction_precision` and `model_direction_match` (gated only on the reference having genes to
+    compare against; that never binds on a real panel). Outside the gate a perturbation's row is
+    NaN and it leaves the aggregate; the set is the same for every submission. In practice
+    `minimal` and `anndata` do not move: a constant reference delta does not occur on real
+    pseudobulk.
+  - The gate has a floor: fewer than 10 reference-significant genes and the perturbation is not
+    scored (for `nsig_spearman`, fewer than 10 targets with one; `delta_pearson`, whose points
+    are every measured gene, has none). The value is
+    `real_gate.DEFAULT_MIN_GATE_SIZE`; a catalog entry can override it. On the three official
+    val panels this leaves 10–28% of targets unscored on the all-gene metrics, 43–57% on
+    `lfc_spearman_pos` and 19–36% on `lfc_spearman_neg`.
+  - Inside the gate, a perturbation the prediction makes undefined still scores the worst value.
+    New: a prediction constant over the gate now scores −1 on the Spearman metrics even where
+    polars returns a spurious finite correlation for a constant column, which 1.43.2 does at 70
+    of the gate sizes from 2 to 1199, the first at 49 (2.0.0 returns NaN at all of them).
+  - `nsig_spearman` no longer gives every submission 1.0 when no target has a significant gene.
+  - `score_metrics`: a gated metric whose aggregate is NaN on both the submission and the
+    baseline is excluded from `avg_score` with a warning instead of refused.
+  - No competition number moves: no `vcc` or `vcc2026` member is gated, and
+    `competition_digest()` is unchanged. v1 is unchanged.
+  - ⚠️ A `full` or `de` baseline or ceiling built before this change is stale, and nothing
+    detects it (#314). Rebuild it. Warm result caches for affected runs are invalidated
+    automatically.
+
+- **`score_cellstream(..., write_de=True)` writes its DE tables through a pinned writer, with
+  bounded memory, and publishes all five outputs together (#389, write_de half).** Same rows,
+  values and columns as 0.18.0; the file bytes differ.
+  - `de_real.parquet` and `de_pred.parquet` go through the new `de_export` writer
+    (`pyarrow.parquet.ParquetWriter`, Zstandard level 3, statistics on, row groups of at most
+    250,000 rows, the generated row order, no index column) instead of `run._write_de_tables`.
+    `de_real` is the reference bundle's table rewritten row group by row group under that
+    contract; the bundle itself and the `write_de=False` path are unchanged.
+  - `de_pred` is merged one piece at a time instead of a whole-table `pl.concat` (a production
+    `de_pred` is ~16.5M rows), and in batch generation order rather than file-name order, which
+    put `ctx_10` before `ctx_2` from eleven batches on.
+  - The two DE tables and the three `ScoreResult` frames are staged first and then published
+    together, rolled back on any error (interrupts included) until the last rename commits the
+    set. In 0.18.0 the DE tables were published before the score files, so a failure while writing
+    a score file left this run's DE tables beside older score files. An `outdir` that is not a
+    directory, or a destination in it that is not a regular file, is now refused before any
+    archive is opened.
+  - A metric selection with no DE metric is refused before any archive is opened, instead of
+    after the whole scoring run.
+  - `pyarrow>=15` joins the `scale` extra and the dev group. `docs/de_tables.md` documents the
+    contract: what "unthresholded" means, the columns, the row order and the publication
+    guarantee.
+
+### Fixed
+
+- **`partition_inmem.score_piece(de_out=...)` checks `piece_id` the way `partial_out` does.** A
+  path input now takes the documented file-stem default instead of raising; an id with a
+  directory part (`../x`), or `""`/`.`/`..`, is refused before any work instead of writing outside
+  `de_out`; and a missing `de_out` directory is created. An in-memory piece with either sink and
+  no `piece_id` now fails at the start, with the same message, instead of after scoring.
+  `score_cellstream` always passed a valid id, so its output is unaffected.
+- **The README and tutorial `score_cellstream` examples now run as written.** They used the
+  default `metrics="full"`, whose four moments-dependent metrics `score_cellstream` refuses with
+  `NotImplementedError`; they select `"minimal"` and `"de"` instead, and the README says which
+  metrics the driver cannot score. Documentation only.
+
 ## [0.18.0] — 2026-10-01
 
 ### Added
@@ -15,7 +224,7 @@ All notable changes to cell_eval2. Releases before 0.0.4 (`v0.0.2`, `v0.0.3`) pr
   through the same `run._write_de_tables` writer the in-memory `--write-degenes` path uses, so the
   two paths emit a byte-identical schema. `de_real` is the reference builder's full real DE table;
   `de_pred` concatenates the per-piece pred DE tables via a new opt-in `de_out` argument on
-  `partition_inmem.score_piece`. This unblocks arcbench-nf's gene-level DE ingest from the
+  `partition_inmem.score_piece`. This unblocks downstream gene-level DE ingest from the
   streaming path.
 
 - **The jackknife's per-gene decomposition, opt-in, on every reader that can build it.**

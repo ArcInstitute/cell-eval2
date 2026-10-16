@@ -631,7 +631,7 @@ def test_auc_nan_guard_holds_under_all_strategies():
                          "log2_fold_change": [3.0, 2.0, 1.0, 1.0],
                          "p_adj": [float("nan"), 0.0, 0.9, 0.95]})
     prep = _toy_prepared(real, pred)
-    for strat in ("clip", "replace_zero", "min_nonzero"):
+    for strat in ("preserve", "clip", "replace_zero", "min_nonzero"):
         for fn in (de_pr_auc, de_roc_auc):
             val = fn(prep, auc_pval_floor=strat)["G1"]
             assert isinstance(val, float) and not math.isinf(val)  # finite or NaN, never a crash

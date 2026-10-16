@@ -5,6 +5,10 @@ streamlined reimplementation of [`cell-eval`](https://github.com/ArcInstitute/ce
 
 - **[Tutorial](docs/tutorial.md)** — a runnable tour: metric selection, caching, CPU/GPU, streaming.
 - **[Metrics reference](docs/metrics.md)** — the definition of every metric in the catalog.
+- **[DE tables](docs/de_tables.md)** — what "unthresholded" means, the DE columns and row order,
+  and the `score_cellstream(write_de=True)` output contract.
+- **[Ground-truth DE cache](docs/ground_truth_cache.md)** — the content-addressed, immutable cache
+  of the real-DE table on the `score_cellstream` path: identity, on-disk format, policies, CLI.
 - **[vcc2026 metric specification](docs/vcc2026_metrics/)** — what the 2026 competition scores, and
   how. Start here if you are entering: the
   [full document](docs/vcc2026_metrics/vcc2026-metrics.pdf) carries the reasoning, the
@@ -160,15 +164,27 @@ from cell_eval2.config import EvalConfig
 
 res = score_cellstream(
     "pred.csad", "real.csad",
-    config=EvalConfig(device="cuda", pert_col="target_gene"),
+    config=EvalConfig(metrics="minimal", device="cuda", pert_col="target_gene"),  # not "full"
     mem_budget=MemBudget(host_bytes=64 * 2**30, gpu_bytes=40 * 2**30),
 )
 print(res.overall)     # per_pert / per_context / overall frames
 ```
 
-- Scores the **full** metric set, DE included, on the same engine as in-memory
-  `compute_metrics` — results are bit-exact on rank and DE metrics and within `1e-7` on
-  continuous ones.
+- Supports every metric of the `"full"` profile except the ones that need per-group moments,
+  which its reference bundles do not carry: `expr_mse_unbiased`, `expr_mse_unbiased_capped`, `expr_distance_unbiased`,
+  and `expr_mse_unbiased_capped_norm`, which is derived from two of them. A selection that
+  resolves to any of them — including the default `"full"`, `"anndata"` and `"vcc2026"` — raises
+  `NotImplementedError`. DE runs on gpudge only, so the `de_deseq2_*` metrics are unavailable.
+- At matched settings, results equal in-memory `compute_metrics`: bit-exact on rank and DE
+  metrics and within `1e-7` on continuous ones. One default differs: the `min_nonzero` AUC p-value
+  floor does not split across batches, so this driver computes `preserve` instead (float64,
+  floored only at the smallest positive float64). On gpudge's Float64 tables the two differ only
+  in what an exact-zero predicted p-value becomes: `min_nonzero` gives it the table's smallest
+  positive p-value, tying the two wherever they share a perturbation, and `preserve` the smallest
+  positive float64 ([`docs/metrics.md`](docs/metrics.md) §4.4). Before 0.19.0 this driver used
+  `replace_zero` at `1e-10`, which could rank a p-value of `1e-100` below `1e-20`; set
+  `de.auc_pval_floor="replace_zero"` and `de.auc_pval_floor_value=1e-10` to reproduce those
+  numbers.
 - Handles counts and lognorm across the whole config matrix; `input_type` is auto-detected from
   the archive.
 - Materializes perturbation-complete batches under an explicit memory budget.
@@ -176,22 +192,32 @@ print(res.overall)     # per_pert / per_context / overall frames
   otherwise from `EvalConfig.control` — so set it explicitly if your archive lacks that column.
 - Pass `outdir=...` to also write the `ScoreResult` frames there (`per_pert.parquet`,
   `per_context.parquet`, `overall.parquet`). Add **`write_de=True`** to additionally emit the raw
-  gene-level DE tables `de_real.parquet` + `de_pred.parquet` — the same artifact the in-memory
-  path writes under `--write-degenes` (via the same writer, so the schema is identical). Off by
-  default; requires `outdir` and at least one DE metric in the selection.
+  gene-level DE tables `de_real.parquet` + `de_pred.parquet` — the unthresholded tables the DE
+  metrics consume, the same artifact the in-memory path writes under `--write-degenes`, here
+  written through a pinned zstd-3 writer with bounded memory and published together with the three
+  score files (rollback on error). Off by default; requires `outdir` and at least one DE metric
+  in the selection. See [`docs/de_tables.md`](docs/de_tables.md) for the exact contract.
 
   ```python
   score_cellstream(
       "pred.csad", "real.csad",
-      config=EvalConfig(device="cuda", pert_col="target_gene"),
+      config=EvalConfig(metrics="de", device="cuda", pert_col="target_gene"),
       mem_budget=MemBudget(host_bytes=64 * 2**30, gpu_bytes=40 * 2**30),
       outdir="results/", write_de=True,   # -> results/de_{real,pred}.parquet
   )
   ```
+- Pass **`ground_truth_cache=<root>`** to compute the real (ground-truth) DE table once and reuse it:
+  later runs against the same real archive and real-DE settings — whatever the prediction — read
+  it instead of recomputing it. The real archive must carry a `payload_sha256` checksum. With
+  `write_de=True` the outputs gain `ground_truth_de_cache.json`, recording the lookup. See
+  [`docs/ground_truth_cache.md`](docs/ground_truth_cache.md).
 
 ## Caching
 
-Point at two cache folders to reuse the real side across many predictions:
+`cell_eval2` has two independent caches.
+
+**The general artifact cache** (`CacheStore`). Point at two cache folders to reuse the real side
+across many predictions:
 
 ```python
 cfg = EvalConfig(metrics="de", cache_real="cache/real", cache_pred="cache/pred_A")
@@ -202,6 +228,13 @@ A cached value is used only when its fingerprint and parameters match, otherwise
 stale or corrupt entries self-heal. `cache_strict=True` content-hashes the matrix instead of using
 the default metadata fingerprint. Passing **paths** rather than in-memory objects keeps peak memory
 to one matrix at a time.
+
+**The ground-truth DE cache** (`score_cellstream(..., ground_truth_cache=<root>)`, see
+*Out-of-core scoring*). A content-addressed, immutable store of the unthresholded real-DE table,
+keyed by the real archive's content checksum plus every setting that can change the table. Every
+hit is re-validated, and a corrupt entry is fatal (`GroundTruthCacheCorruptError`) — never
+recomputed over, because a false hit on ground truth is the one failure it must not produce.
+`cache_real` plays no part in it. See [`docs/ground_truth_cache.md`](docs/ground_truth_cache.md).
 
 ## License
 

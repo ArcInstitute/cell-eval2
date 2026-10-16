@@ -212,7 +212,12 @@ def test_dispatch_emits_one_finite_row_per_pert():
     for name in _NEW:
         vals = [r["value"] for r in rows if r["metric"] == name]
         assert len(vals) == 2                                   # one row per pert, none dropped
-        assert all(math.isfinite(v) and -1.0 <= v <= 1.0 for v in vals)
+        if CATALOG[name].real_gate is not None:
+            # #391: P1's reference has two significant genes and P2's none -- both below the
+            # gate's floor of 10 -- so the reference cannot score either: NaN, not -1.
+            assert all(math.isnan(v) for v in vals), name
+        else:
+            assert all(math.isfinite(v) and -1.0 <= v <= 1.0 for v in vals), name
 
 
 def _floor_side_frame():

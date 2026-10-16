@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 from . import norm
 from .cache import fingerprint_adata, fingerprint_de_table
 from .catalog import CATALOG, _NAME_TO_CANONICAL, derived_policy, is_decisive, resolve_metrics
-from .config import EvalConfig
+from .config import EvalConfig, target_gene_entry
 from .de import load_de_table
 from .distances import resolve_exclusion_columns
 from .io import load_anndata
@@ -107,7 +107,7 @@ def generic_response_profile(
     pert_col: str,
     control: str,
     exclude_target_gene: bool = True,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
 ) -> GenericProfile:
     """Mean per-perturbation pseudobulk of ``real``, over non-control perturbations.
 
@@ -134,7 +134,8 @@ def generic_response_profile(
     ``target_gene_map`` is ``EvalConfig.target_gene_map``: the construct-ID escape hatch
     (``'ADNP-1'`` -> ``'ADNP'``) that decides what "this perturbation's target gene" means
     for ``pds_*`` and the chance-corrected DE metrics. It has to reach here too, or the
-    baseline disagrees with the metrics it is the reference point for (#253, #285).
+    baseline disagrees with the metrics it is the reference point for (#253, #285). A label
+    it declares to have no target gene (#397) excludes nothing here either.
     """
     return _profile_from_adata(
         _materialize_reference(real), pert_col=pert_col, control=control,
@@ -144,7 +145,7 @@ def generic_response_profile(
 
 def _profile_from_adata(
     adata, *, pert_col: str, control: str, exclude_target_gene: bool,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
 ) -> GenericProfile:
     """``generic_response_profile`` on an already-open handle (the orchestrator owns one)."""
     if pert_col not in adata.obs.columns:
@@ -181,7 +182,12 @@ def _profile_from_adata(
     n_excluded = 0
 
     if exclude_target_gene:
-        if n < 2:
+        # #397: a label DECLARED to have no target gene contributes to every gene's mean, so
+        # this guard -- which protects the one contribution a target gene would lose -- does not
+        # apply to it. str() keys, as `resolve_exclusion_columns` reads the map.
+        if n < 2 and target_gene_entry(
+                {str(k): v for k, v in (target_gene_map or {}).items()},
+                str(labels[0])) is not None:
             raise ValueError(
                 f"exclude_target_gene=True needs at least 2 non-control perturbations "
                 f"(got {n}): dropping the only contribution to a targeted gene would "
@@ -760,7 +766,7 @@ def config_digest(config: EvalConfig, *, comparator: str, de_real=None) -> str:
     ASKED FOR; nothing digests what a metric MEANS. A baseline built before a metric's
     definition changed, scored against submissions computed after it, is precisely the failure
     the second paragraph describes -- identically-shaped frames, silently wrong margins -- and
-    it passes this digest. FIVE live instances: #172 (three scored ``vcc2026`` members stopped
+    it passes this digest. SEVEN live instances: #172 (three scored ``vcc2026`` members stopped
     scoring each perturbation's own target gene), #248 (the same for ``pds_*``), the
     ``direction_reach_raw`` purity floor moving from ``1 - alpha/2`` to
     ``direction.REACH_PURITY_FLOOR``, **#271** (``prep._grouped_sums`` reduces WIDE, so the
@@ -768,6 +774,16 @@ def config_digest(config: EvalConfig, *, comparator: str, de_real=None) -> str:
     (``expr_mse_unbiased_capped`` gained the ``r`` factor on the prediction's correction, and
     added no config field -- verified, ``config.py`` is untouched by that commit, where its
     same-wave sibling #343 DID add ``discrimination.exclusion_scope`` and so IS caught here).
+    **#391** is the sixth: sixteen ``full``/``de`` metrics gained a reference-only gate with a
+    floor of 10 and five of them lost their worst value, with no config field to see it -- a
+    pre-#391 ``full``/``de`` baseline digests identically to a post-#391 run and must be rebuilt.
+    (Unlike the result cache, which keys on each metric's gate and worst value by value.)
+    **#397** is the seventh: a ``"*"`` key in ``target_gene_map`` was an ordinary label before it
+    and declares every label without an entry of its own target-free after, and the map is all
+    this digest sees -- so a pre-#397 baseline built from a map with a ``"*"`` key, or from a map
+    holding ``None`` on a panel with a feature literally named ``None``, digests identically to a
+    post-#397 run and must be rebuilt. (The result cache, ``partition.result_semantics`` and the anchor identity carry
+    ``run._NO_TARGET_GENE_SEMANTICS``.)
     ⚠️ #348 is benign FOR THE MEASURED OFFICIAL BASELINES, and the SCOPE is the point -- read it
     before reusing any baseline across the bump. ``metrics.delta._numerator`` gates the whole #348
     block on ``if claim > 0.0``, so a baseline whose cells are IDENTICAL within a group has
@@ -1009,6 +1025,68 @@ def _environment_record(resolved_de_backend: str | None) -> dict:
     return record
 
 
+def _run_meta_side_needs_x(config) -> bool:
+    """Whether ``build_run_meta``'s metadata pass must read ``X`` (one answer for both sides).
+
+    It does only when the STRICT fingerprint hashes X (``cache_strict``), or when input-type
+    resolution samples X: v1 autodetects both sides, and v2 autodetects the PRED side when
+    ``autodetect_input_type`` is set. ⚠️ That last case reads the REAL side's X too: the anchor
+    semantic identity, computed on the real pass, resolves the PRED convention on the real matrix
+    (``anchor.anchor_semantic_params`` calls ``_effective_input_type(real_ad, side="pred")``), so a
+    stub there records the convention of an empty matrix. Otherwise every field the pass computes
+    (the strict=False fingerprint, ``_effective_input_type`` returning the declared type, the
+    anchor semantic identity) is metadata-only -- so a cell-layout archive need not be
+    materialized."""
+    return bool(config.cache_strict or config.version == "v1" or config.autodetect_input_type)
+
+
+def _cell_metadata_adata(path):
+    """A metadata-only AnnData over a cell-layout (``.shad``) archive: the archive's real ``obs``
+    and ``var`` with a 0-nnz stub ``X`` of the archive's shape and dtype. ``fingerprint_adata``
+    (strict=False) reads only shape, ``X.dtype``, ``var.index`` and ``obs[pert_col]`` (cache.py),
+    so this reproduces its hash BIT-FOR-BIT against a materialized read while reading no payload.
+    Used by ``build_run_meta`` to avoid materializing a 1.3M-cell archive just to stamp provenance
+    (there is no backed reader for the format, so ``load_anndata`` would otherwise load all of X).
+    Returns None when the materialized dtype cannot be read from the manifest; the caller then
+    materializes."""
+    import anndata as ad
+    import pandas as pd
+    import scipy.sparse as sp
+
+    from ._cell_archive import materialized_x_dtype, open_cell_store
+
+    store = open_cell_store(path)
+    try:
+        # The dtype a MATERIALIZED read reports, so the dtype string fingerprint_adata hashes is
+        # identical. Not a gather probe: gathers are float32 even where materialization keeps
+        # uint32 (see materialized_x_dtype).
+        dtype = materialized_x_dtype(store)
+        if dtype is None:
+            return None
+        n_obs, n_vars = int(store.n_obs), int(store.n_vars)
+        obs = store.obs.copy()
+        var = (store.var.copy() if store.var is not None
+               else pd.DataFrame(index=range(n_vars)))
+        X = sp.csr_matrix((n_obs, n_vars), dtype=dtype)
+        return ad.AnnData(X=X, obs=obs, var=var)
+    finally:
+        store.close()
+
+
+def _run_meta_side_adata(source, config):
+    """The AnnData ``build_run_meta`` reads for one side. For a cell-layout path whose metadata
+    pass needs no X (see :func:`_run_meta_side_needs_x`), a metadata-only stub that reads no
+    payload; otherwise the ordinary backed/materialized load (unchanged behavior)."""
+    if isinstance(source, (str, os.PathLike)) and not _run_meta_side_needs_x(config):
+        from ._cell_archive import cell_layout
+
+        if cell_layout(source):
+            stub = _cell_metadata_adata(source)
+            if stub is not None:
+                return stub
+    return load_anndata(source, backed=isinstance(source, (str, os.PathLike)))
+
+
 def build_run_meta(config: EvalConfig, real, pred, *, de_real=None, de_pred=None) -> dict:
     """The resolved-identity record an ordinary ``run`` writes, so ``score`` can compare it
     against the baseline stamp. Same fields, same names, same resolution helpers -- keeping
@@ -1083,7 +1161,7 @@ def build_run_meta(config: EvalConfig, real, pred, *, de_real=None, de_pred=None
         ("real", real, "source_fingerprint", "input_type_real_effective"),
         ("pred", pred, None, "input_type_pred_effective"),
     ):
-        adata = load_anndata(source, backed=isinstance(source, (str, os.PathLike)))
+        adata = _run_meta_side_adata(source, config)
         try:
             if config.pert_col not in adata.obs.columns:
                 raise ValueError(
@@ -1279,11 +1357,22 @@ def _degenerate_metrics(agg: pl.DataFrame, *, statistic: str = "mean") -> list[d
     row = agg.filter(pl.col(agg.columns[0]) == statistic).drop(agg.columns[0])
     if row.height == 0:
         raise ValueError(f"aggregate has no {statistic!r} row to validate")
+    empty = _empty_cohort_metrics(agg)
     out: list[dict] = []
     for name, val in zip(row.columns, row.row(0)):
         spec = CATALOG.get(_NAME_TO_CANONICAL.get(name, name))
         if spec is None or not spec.scoring.scored:
             continue          # unscored by score_metrics -> a degenerate value is inert
+        if name in empty:
+            # #391 (spec §10.4): a GATED metric's non-finite aggregate means its reference-only
+            # gate admitted no perturbation -- a property of the reference, identical for every
+            # submission, not a corrupt artifact. `score_metrics` decides at scoring time, where it
+            # also sees the submission: NaN on both sides leaves avg_score with a warning, and a
+            # NaN baseline beside a finite submission still reaches its degenerate-baseline branch.
+            # Canonical spelling only: the gate runs under v2 alone, and a v1 artifact (v1 aliases)
+            # keeps the existing report. And an EMPTY cohort only (`_empty_cohort_metrics`): a NaN
+            # std beside a finite mean is one admitted perturbation, still reported.
+            continue
         if not is_degenerate(val, spec.scoring):
             continue
         if val is None or not np.isfinite(val):
@@ -1329,6 +1418,25 @@ def _degenerate_message(offenders, *, allow_degenerate: bool) -> str:
     return msg + " Recorded in the stamp (allow_degenerate=True)."
 
 
+def _empty_cohort_metrics(agg: pl.DataFrame) -> set[str]:
+    """The GATED metrics, in their canonical (v2) spelling, whose reference-only gate admitted no
+    perturbation: their MEAN row is non-finite (#391). A v1 alias never qualifies -- the gate runs
+    under v2 alone."""
+    # By NAME when present: `score_metrics` reads frames whose statistic column need not come
+    # first, and a positional lookup would then compare a metric column with "mean".
+    stat = "statistic" if "statistic" in agg.columns else agg.columns[0]
+    row = agg.filter(pl.col(stat) == "mean").drop(stat)
+    if row.height == 0:
+        return set()
+    out = set()
+    for name, val in zip(row.columns, row.row(0)):
+        spec = CATALOG.get(_NAME_TO_CANONICAL.get(name, name))
+        if (spec is not None and spec.real_gate is not None and name == spec.name
+                and (val is None or not np.isfinite(val))):
+            out.add(name)
+    return out
+
+
 def _require_scoreable(agg: pl.DataFrame) -> None:
     """At least one column must actually contribute to ``avg_score``.
 
@@ -1340,14 +1448,18 @@ def _require_scoreable(agg: pl.DataFrame) -> None:
     raise, one level up.
     """
     cols = [c for c in agg.columns if c != agg.columns[0]]
+    # #391: a gated metric whose gate admitted no perturbation contributes nothing either, so it
+    # cannot be what makes the artifact scoreable.
+    empty = _empty_cohort_metrics(agg)
     scoreable = [c for c in cols
                  if (spec := CATALOG.get(_NAME_TO_CANONICAL.get(c, c))) is not None
-                 and spec.scoring.scored]
+                 and spec.scoring.scored and c not in empty]
     if not scoreable:
         raise ValueError(
             f"no scoreable metric in the baseline aggregate (columns: {cols}). Every one is "
-            "scored=False, so score_metrics would score nothing and report a vacuous "
-            "avg_score of 0.0. Select at least one scoreable metric."
+            "scored=False, or gated with no perturbation its reference admits (#391), so "
+            "score_metrics would score nothing and report a vacuous avg_score of 0.0. Select "
+            "at least one scoreable metric."
         )
 
 

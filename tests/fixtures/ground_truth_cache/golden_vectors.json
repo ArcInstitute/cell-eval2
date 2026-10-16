@@ -1,0 +1,405 @@
+{
+  "contract": {
+    "domain_sequence": "cell-eval2-string-sequence-v1",
+    "fingerprint_algorithm": "cell-eval2-ground-truth-cellstream-v1",
+    "archive_format": "cellstream-cell-archive",
+    "cache_key_algorithm": "cell-eval2-real-deg-cache-key-v1",
+    "cache_format_version": 1,
+    "real_de_semantics_version": 1,
+    "semantic_document_keys_v1": [
+      "cache_format_version",
+      "real_de_semantics_version",
+      "cell_eval2_version",
+      "gpudge_version",
+      "cellstream_decoder_version",
+      "de_backend",
+      "config_version",
+      "input_type",
+      "target_sum",
+      "pert_col",
+      "control",
+      "mean_calc",
+      "epsilon",
+      "clip_value",
+      "fdr_scope",
+      "filter_gene_min_cpm_cell",
+      "validate_input",
+      "max_counts_per_cell",
+      "allow_fractional_real",
+      "native_gpu_normalize",
+      "device",
+      "precision"
+    ],
+    "fingerprint_document_keys_v1": [
+      "fingerprint_algorithm",
+      "archive_format",
+      "payload_sha256",
+      "n_obs",
+      "n_vars",
+      "feature_axis_sha256",
+      "perturbation_axis_sha256",
+      "pert_col"
+    ],
+    "canonical_json": "keys sorted by code point; separators ',' and ':'; ensure_ascii=False; allow_nan=False; floats via Python shortest repr",
+    "sequence_digest": "sha256(domain || 0x00 || u64be(count) || (u64be(len(utf8)) || utf8)*)"
+  },
+  "canonical_json": [
+    {
+      "input": {
+        "b": 1,
+        "a": [
+          1,
+          2,
+          {
+            "z": null,
+            "y": true
+          }
+        ]
+      },
+      "expected_utf8": "{\"a\":[1,2,{\"y\":true,\"z\":null}],\"b\":1}",
+      "expected_sha256": "d6ae48f46655f67e859afc5c997311f8d21e10c126c66dddd2b6a5bc49dfe25e"
+    },
+    {
+      "input": {
+        "ünï": "cødé ∆ 細胞",
+        "n": 1000000.0,
+        "e": 1e-09,
+        "i": 10000,
+        "f": 10000.0,
+        "neg": -0.0
+      },
+      "expected_utf8": "{\"e\":1e-09,\"f\":10000.0,\"i\":10000,\"n\":1000000.0,\"neg\":-0.0,\"ünï\":\"cødé ∆ 細胞\"}",
+      "expected_sha256": "28881e5399d9cbb67d99006b17bb22903af19a5a4c6822db3880a124a24af86b"
+    },
+    {
+      "input": {
+        "a": {},
+        "b": [],
+        "c": "",
+        "d": false
+      },
+      "expected_utf8": "{\"a\":{},\"b\":[],\"c\":\"\",\"d\":false}",
+      "expected_sha256": "97a77b140c147f7d7c35de286e07993b2f2cd79f8af5ca47e70b9d8fb5994dc0"
+    },
+    {
+      "input": {
+        "nested": {
+          "k2": {
+            "k1": [
+              3,
+              2,
+              1
+            ]
+          },
+          "k1": "x"
+        },
+        "": "empty-key"
+      },
+      "expected_utf8": "{\"\":\"empty-key\",\"nested\":{\"k1\":\"x\",\"k2\":{\"k1\":[3,2,1]}}}",
+      "expected_sha256": "f5c069344146302c3c1c16f7d7a97fb612bbfcbeb606821c3b0642b0a0be720f"
+    },
+    {
+      "input": {
+        "quote": "a\"b\\c\n\t/"
+      },
+      "expected_utf8": "{\"quote\":\"a\\\"b\\\\c\\n\\t/\"}",
+      "expected_sha256": "914ad1c7a602c58852c6fc6ff33bdd147f9a8a3732f9b65088e4e83c569e8271"
+    }
+  ],
+  "sequence_sha256": [
+    {
+      "input": [],
+      "expected_sha256": "79deeb37e6d1a178a01edc284aa8750c10f8f71eca04f4ac284ed7a7fea4ef73"
+    },
+    {
+      "input": [
+        "a"
+      ],
+      "expected_sha256": "62cd9a7ffc83b2b6c9bf64d0422ff27be7daaa10df83d2d292265bb912fb2c47"
+    },
+    {
+      "input": [
+        "a",
+        "b"
+      ],
+      "expected_sha256": "919f8430cbc2947f80852d460bae5ac16c5caddca4eb6911aa717aad4123e916"
+    },
+    {
+      "input": [
+        "b",
+        "a"
+      ],
+      "expected_sha256": "aacc661a0e8b04433a93c5d37121a46b8917815010f025cc6d448e09e556ddc4"
+    },
+    {
+      "input": [
+        "ab"
+      ],
+      "expected_sha256": "c9c803865347b98d5134392a724ab1af5a6ac2e3949fa49c9510bf276ae2780c"
+    },
+    {
+      "input": [
+        "a\u0000b"
+      ],
+      "expected_sha256": "0cdfd64372e79426037478a40aa0a5e82eb0802bba414c66310048c0a24ac4e5"
+    },
+    {
+      "input": [
+        "a,b"
+      ],
+      "expected_sha256": "7b08ea6fb3cc434505b6997500bcfc9430c8f58e1257443adcfd45ad12585235"
+    },
+    {
+      "input": [
+        "",
+        ""
+      ],
+      "expected_sha256": "703a1dac9c387889ee24be86860182cee21a9402810c38b40cc3f49fbb34639f"
+    },
+    {
+      "input": [
+        "non-targeting",
+        "TG01",
+        "TG01",
+        "TG02"
+      ],
+      "expected_sha256": "b1ba02f41f960e92a37d82e811302dc597411e6f1dee32e7d630dc0171fa6162"
+    },
+    {
+      "input": [
+        "gène",
+        "β-actin",
+        "ENSG00000000003"
+      ],
+      "expected_sha256": "3cc40eb76c8e70182aec4caad0e5b0ea4ba7ba7d77d4e2d9f20e353b58637243"
+    }
+  ],
+  "rejections": {
+    "canonical_json": [
+      "float('nan')",
+      "float('inf')",
+      "{1: 'non-str key'}",
+      "bytes",
+      "set"
+    ],
+    "sequence_sha256": [
+      "[None]",
+      "[1]",
+      "[b'x']",
+      "lone surrogate str"
+    ],
+    "fingerprint": [
+      "payload_sha256=None",
+      "payload_sha256=''",
+      "uppercase hex",
+      "63/65-char hex"
+    ]
+  },
+  "ground_truth_fingerprint": {
+    "synthetic": {
+      "input": {
+        "payload_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "var_names": [
+          "g0",
+          "g1",
+          "g2"
+        ],
+        "pert_labels": [
+          "ctrl",
+          "ctrl",
+          "A",
+          "B"
+        ],
+        "pert_col": "perturbation"
+      },
+      "expected_document": {
+        "fingerprint_algorithm": "cell-eval2-ground-truth-cellstream-v1",
+        "archive_format": "cellstream-cell-archive",
+        "payload_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "n_obs": 4,
+        "n_vars": 3,
+        "feature_axis_sha256": "01de05eb1ad6f436ce5855111ef517b581c3e952907c98e6f7b34e8a3d627c89",
+        "perturbation_axis_sha256": "c3c90373bb0e4b10e63cfbff62902656fcdf28f619431a6daa0dc57810b93993",
+        "pert_col": "perturbation"
+      },
+      "expected_sha256": "ece731345752d8a556d68b1adf5e1ba0395a07d999222b9f7f95624ddc4026bb"
+    },
+    "fixture_archives": [
+      {
+        "file": "real.shad",
+        "payload_sha256": "8765b5580dd312fdbff016e41912052a1339960cc088ef335d54d18fe118067a",
+        "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+        "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+        "expected_document": {
+          "fingerprint_algorithm": "cell-eval2-ground-truth-cellstream-v1",
+          "archive_format": "cellstream-cell-archive",
+          "payload_sha256": "8765b5580dd312fdbff016e41912052a1339960cc088ef335d54d18fe118067a",
+          "n_obs": 320,
+          "n_vars": 150,
+          "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+          "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+          "pert_col": "perturbation"
+        },
+        "expected_sha256": "8cea1d86e076bcee85aebfef09cde57ece0a17c0e82389d744b37de2d09640f4",
+        "expected_cache_id_with_illustrative_semantics": "628dba34964e8407524aaf4c8d4971d2c4f5b31a3b563b30a3e2748f325b5c84",
+        "expected_entry_relpath": "ground-truth-deg/v1/62/628dba34964e8407524aaf4c8d4971d2c4f5b31a3b563b30a3e2748f325b5c84"
+      },
+      {
+        "file": "real_nochecksum.shad",
+        "payload_sha256": null,
+        "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+        "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+        "expected_document": null,
+        "expected_sha256": null
+      },
+      {
+        "file": "real_onevalue.shad",
+        "payload_sha256": "09a8c947c7827bb04904e20fc4aadcd081efcb1410df0da0c7c79b42dfd9ca1c",
+        "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+        "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+        "expected_document": {
+          "fingerprint_algorithm": "cell-eval2-ground-truth-cellstream-v1",
+          "archive_format": "cellstream-cell-archive",
+          "payload_sha256": "09a8c947c7827bb04904e20fc4aadcd081efcb1410df0da0c7c79b42dfd9ca1c",
+          "n_obs": 320,
+          "n_vars": 150,
+          "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+          "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+          "pert_col": "perturbation"
+        },
+        "expected_sha256": "5daccd382548f65b3703c5b685b341d4a72a3797a2ea9ffe9dd59c6c80380b3b",
+        "expected_cache_id_with_illustrative_semantics": "51bf4a6e5dc63de9d9d73476e080a50727b3ad7cc34e62fd189a8e58d1427fc3",
+        "expected_entry_relpath": "ground-truth-deg/v1/51/51bf4a6e5dc63de9d9d73476e080a50727b3ad7cc34e62fd189a8e58d1427fc3"
+      },
+      {
+        "file": "pred_a.shad",
+        "payload_sha256": null,
+        "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+        "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+        "expected_document": null,
+        "expected_sha256": null
+      },
+      {
+        "file": "pred_b.shad",
+        "payload_sha256": "2a9bc91cd79970ba7bc17bf3c822a591f000677b8c27b5f14a81edfbdf2ff7ee",
+        "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+        "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+        "expected_document": {
+          "fingerprint_algorithm": "cell-eval2-ground-truth-cellstream-v1",
+          "archive_format": "cellstream-cell-archive",
+          "payload_sha256": "2a9bc91cd79970ba7bc17bf3c822a591f000677b8c27b5f14a81edfbdf2ff7ee",
+          "n_obs": 320,
+          "n_vars": 150,
+          "feature_axis_sha256": "cc14c66de1e757852ce18459f14215050f9938b2580b002d8507d0e939e6c788",
+          "perturbation_axis_sha256": "07c86b332a19cb85fe5d9460a8b11fb38e740e8fc3c4800c719c6b3ea64454d2",
+          "pert_col": "perturbation"
+        },
+        "expected_sha256": "4096c60928ffa6e7436a9a7b791c8423e91a8d736f6bd5b4675e7871516dd7b5",
+        "expected_cache_id_with_illustrative_semantics": "558a83c505c649b51b9c18ba9e9e9f0dcebfdcbaff9e055ee6074de16fefc773",
+        "expected_entry_relpath": "ground-truth-deg/v1/55/558a83c505c649b51b9c18ba9e9e9f0dcebfdcbaff9e055ee6074de16fefc773"
+      }
+    ]
+  },
+  "de_semantics": {
+    "illustrative_production_v1": {
+      "document": {
+        "cache_format_version": 1,
+        "real_de_semantics_version": 1,
+        "cell_eval2_version": "0.17.0",
+        "gpudge_version": "0.9.1",
+        "cellstream_decoder_version": "0.10.0",
+        "de_backend": "gpudge",
+        "config_version": "v1",
+        "input_type": "lognorm",
+        "target_sum": null,
+        "pert_col": "perturbation",
+        "control": "non-targeting",
+        "mean_calc": "geometric",
+        "epsilon": 1e-09,
+        "clip_value": null,
+        "fdr_scope": "per_pert",
+        "filter_gene_min_cpm_cell": 5.0,
+        "validate_input": true,
+        "max_counts_per_cell": 1000000000.0,
+        "allow_fractional_real": false,
+        "native_gpu_normalize": true,
+        "device": "cuda",
+        "precision": "float32"
+      },
+      "expected_sha256": "f4349515b61671eb033b91b6f132d99e1fff00ce1a911b221c4ef6cbf98d74f4"
+    },
+    "mutation_filter_gene_min_cpm_cell_null": {
+      "document": {
+        "cache_format_version": 1,
+        "real_de_semantics_version": 1,
+        "cell_eval2_version": "0.17.0",
+        "gpudge_version": "0.9.1",
+        "cellstream_decoder_version": "0.10.0",
+        "de_backend": "gpudge",
+        "config_version": "v1",
+        "input_type": "lognorm",
+        "target_sum": null,
+        "pert_col": "perturbation",
+        "control": "non-targeting",
+        "mean_calc": "geometric",
+        "epsilon": 1e-09,
+        "clip_value": null,
+        "fdr_scope": "per_pert",
+        "filter_gene_min_cpm_cell": null,
+        "validate_input": true,
+        "max_counts_per_cell": 1000000000.0,
+        "allow_fractional_real": false,
+        "native_gpu_normalize": true,
+        "device": "cuda",
+        "precision": "float32"
+      },
+      "expected_sha256": "c00a145654bffc7b599bf8515bd614d754c0a6be8ac0316ccb810b57acddcd0b"
+    }
+  },
+  "cache_id": {
+    "synthetic_fingerprint_x_illustrative_semantics": {
+      "expected_key_document": {
+        "cache_key_algorithm": "cell-eval2-real-deg-cache-key-v1",
+        "ground_truth_fingerprint": {
+          "fingerprint_algorithm": "cell-eval2-ground-truth-cellstream-v1",
+          "archive_format": "cellstream-cell-archive",
+          "payload_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "n_obs": 4,
+          "n_vars": 3,
+          "feature_axis_sha256": "01de05eb1ad6f436ce5855111ef517b581c3e952907c98e6f7b34e8a3d627c89",
+          "perturbation_axis_sha256": "c3c90373bb0e4b10e63cfbff62902656fcdf28f619431a6daa0dc57810b93993",
+          "pert_col": "perturbation"
+        },
+        "de_semantics": {
+          "cache_format_version": 1,
+          "real_de_semantics_version": 1,
+          "cell_eval2_version": "0.17.0",
+          "gpudge_version": "0.9.1",
+          "cellstream_decoder_version": "0.10.0",
+          "de_backend": "gpudge",
+          "config_version": "v1",
+          "input_type": "lognorm",
+          "target_sum": null,
+          "pert_col": "perturbation",
+          "control": "non-targeting",
+          "mean_calc": "geometric",
+          "epsilon": 1e-09,
+          "clip_value": null,
+          "fdr_scope": "per_pert",
+          "filter_gene_min_cpm_cell": 5.0,
+          "validate_input": true,
+          "max_counts_per_cell": 1000000000.0,
+          "allow_fractional_real": false,
+          "native_gpu_normalize": true,
+          "device": "cuda",
+          "precision": "float32"
+        }
+      },
+      "expected_cache_id": "1040b1c9e65ae8498d0c873887f36c5a5d6525204ab51fa23815491d7a4439cc",
+      "expected_entry_relpath": "ground-truth-deg/v1/10/1040b1c9e65ae8498d0c873887f36c5a5d6525204ab51fa23815491d7a4439cc"
+    },
+    "synthetic_fingerprint_x_mutated_semantics": {
+      "expected_cache_id": "576e611ba3e81f696f5afac95632b9fa6ed7763a8ef82ce7d455c1d478e63f64"
+    }
+  }
+}

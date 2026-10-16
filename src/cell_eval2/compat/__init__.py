@@ -54,7 +54,7 @@ class MetricsEvaluator:
         prefix: str | None = None,
         pdex_kwargs: dict | None = None,
         skip_de: bool = False,
-        target_gene_map: dict[str, str] | None = None,
+        target_gene_map: dict[str, str | None] | None = None,
         exclude_target_gene: bool | None = None,
     ) -> None:
         warnings.warn(

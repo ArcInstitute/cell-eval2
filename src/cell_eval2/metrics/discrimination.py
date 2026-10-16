@@ -42,7 +42,7 @@ def discrimination_score(
     exclusion_scope: Literal["row", "panel"] = "panel",
     control_source: Literal["pred", "real"] = "pred",
     genes: np.ndarray | None = None,
-    target_gene_map: dict[str, str] | None = None,
+    target_gene_map: dict[str, str | None] | None = None,
     embed_key: str | None = None,
 ) -> dict[str, float]:
     """Perturbation Discrimination Score (PDS), per perturbation.
@@ -111,7 +111,9 @@ def discrimination_score(
     exclusion, the SAME `EvalConfig.target_gene_map` the DE metrics resolve through.
     Required for guide-level panels, whose labels are construct IDs (`ADNP-1`) rather
     than gene symbols; without it those labels match no gene and `exclude_target_gene`
-    now raises rather than silently scoring with nothing excluded (issue #248).
+    now raises rather than silently scoring with nothing excluded (issue #248). A `None`
+    value, or `{"*": None}` for every label, declares that a perturbation has no target
+    gene (#397): it excludes nothing, under either scope, and is never matched by name.
 
     `control_source`: "pred" subtracts the predicted control from predicted
     means; "real" subtracts the real control. The real side always uses the

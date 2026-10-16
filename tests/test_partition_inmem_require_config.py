@@ -32,8 +32,15 @@ def test_accepts_v2_real_still_normalizes_min_nonzero():
     assert v2.de.auc_pval_floor == "min_nonzero"
     cfg = partition_inmem._require_partition_config(v2)
     assert cfg.control_source == "real"
-    assert cfg.de.auc_pval_floor == "replace_zero"   # normalized (NOT partition-invariant)
-    assert cfg.de.auc_pval_floor_value == 1e-10
+    assert cfg.de.auc_pval_floor == "preserve"       # normalized: min_nonzero is NOT partition-invariant
+    # Only the policy moves: preserve reads no auc_pval_floor_value, so it is left as given.
+    assert replace(cfg.de, auc_pval_floor="min_nonzero") == v2.de
+
+
+def test_passes_preserve_through_unchanged():
+    v2 = EvalConfig.v2()
+    v2 = replace(v2, de=replace(v2.de, auc_pval_floor="preserve"))
+    assert partition_inmem._require_partition_config(v2) is v2   # elementwise
 
 
 def test_preserves_replace_zero():

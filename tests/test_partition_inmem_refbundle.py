@@ -323,8 +323,11 @@ def test_score_piece_writes_the_pred_de_table_when_de_out_is_set(tmp_path, monke
                   metrics=["de_wilcoxon_lfc_nmae"], target_sum=54611.0)
     bundle = partition_inmem._RefBundle(d, cfg)
 
-    fake_pred_de = pl.DataFrame({"target": ["A", "B"], "feature": ["g0", "g1"],
-                                 "log2_fold_change": [1.0, 2.0], "p_adj": [0.1, 0.2]})
+    # "Z" is a target the piece does not contain. The raw table must be captured BEFORE the
+    # piece-target filter, so Z has to reach the file -- moving the write below that filter (or
+    # below prepare_de) would drop it and fail here.
+    fake_pred_de = pl.DataFrame({"target": ["A", "B", "Z"], "feature": ["g0", "g1", "g2"],
+                                 "log2_fold_change": [1.0, 2.0, 3.0], "p_adj": [0.1, 0.2, 0.3]})
     monkeypatch.setattr(partition_inmem, "compute_de", lambda *a, **k: fake_pred_de)
     monkeypatch.setattr(partition_inmem, "_check_control_space", lambda *a, **k: None)
 
@@ -343,13 +346,14 @@ def test_score_piece_writes_the_pred_de_table_when_de_out_is_set(tmp_path, monke
                                     piece_id="ctx_0", de_out=str(de_out))
 
     written = pl.read_parquet(de_out / "ctx_0__de_pred.parquet")
-    assert written["target"].to_list() == ["A", "B"]                 # the pred_de was written
+    assert written["target"].to_list() == ["A", "B", "Z"]            # raw, pre-filter pred_de
     assert {"target", "feature", "log2_fold_change", "p_adj"} <= set(written.columns)
 
 
 def test_score_piece_does_not_write_de_when_de_out_is_none(tmp_path, monkeypatch):
-    """The default: with no de_out, score_piece writes no per-piece DE parquet. Same stop-at-
-    prepare_de seam, so the absence of a write is what distinguishes the two paths."""
+    """The default: with no de_out, score_piece writes no per-piece DE parquet ANYWHERE. Same
+    stop-at-prepare_de seam, with every DataFrame.write_parquet call recorded -- checking an
+    empty directory that was never passed to score_piece could not fail (review of #388)."""
     d = _write_bundle_with_target(str(tmp_path), 54611.0)
     cfg = replace(EvalConfig.v2(), pert_col="target_gene",
                   metrics=["de_wilcoxon_lfc_nmae"], target_sum=54611.0)
@@ -366,12 +370,97 @@ def test_score_piece_does_not_write_de_when_de_out_is_none(tmp_path, monkeypatch
     monkeypatch.setattr(partition_inmem, "prepare_de",
                         lambda *a, **k: (_ for _ in ()).throw(_Stopped()))
 
-    de_out = tmp_path / "de_parts"
-    de_out.mkdir()
+    writes: list[str] = []
+    real_write = pl.DataFrame.write_parquet
+
+    def _spy(self, file, *a, **k):
+        writes.append(str(file))
+        return real_write(self, file, *a, **k)
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", _spy)
     with pytest.raises(_Stopped):
         partition_inmem.score_piece(_piece_on_bundle_genes(), d, config=cfg, bundle=bundle,
                                     piece_id="ctx_0")
-    assert list(de_out.iterdir()) == []
+    assert not [w for w in writes if w.endswith("__de_pred.parquet")], writes
+
+
+def _stop_at_prepare_de(monkeypatch):
+    """Stub the GPU-only DE compute and stop the run at prepare_de, right after the de_out write
+    -- the seam the two tests above use."""
+    class _Stopped(Exception):
+        pass
+
+    monkeypatch.setattr(partition_inmem, "compute_de",
+                        lambda *a, **k: pl.DataFrame({"target": ["A"], "feature": ["g0"],
+                                                      "log2_fold_change": [1.0], "p_adj": [0.1]}))
+    monkeypatch.setattr(partition_inmem, "_check_control_space", lambda *a, **k: None)
+    monkeypatch.setattr(partition_inmem, "prepare_de",
+                        lambda *a, **k: (_ for _ in ()).throw(_Stopped()))
+    return _Stopped
+
+
+def _de_only_cfg_and_bundle(tmp_path):
+    d = _write_bundle_with_target(str(tmp_path), 54611.0)
+    cfg = replace(EvalConfig.v2(), pert_col="target_gene",
+                  metrics=["de_wilcoxon_lfc_nmae"], target_sum=54611.0)
+    return d, cfg, partition_inmem._RefBundle(d, cfg)
+
+
+def test_score_piece_de_out_defaults_piece_id_to_the_file_stem(tmp_path, monkeypatch):
+    """A path input with de_out and no piece_id takes the documented file-stem default, exactly
+    as partial_out does -- before the fix the default ran only in the partial_out branch, so this
+    raised "needs an explicit piece_id" (review of #388)."""
+    d, cfg, bundle = _de_only_cfg_and_bundle(tmp_path)
+    stopped = _stop_at_prepare_de(monkeypatch)
+    piece_path = tmp_path / "piece_7.h5ad"
+    _piece_on_bundle_genes().write_h5ad(piece_path)
+
+    de_out = tmp_path / "de_parts"
+    with pytest.raises(stopped):
+        partition_inmem.score_piece(str(piece_path), d, config=cfg, bundle=bundle,
+                                    de_out=str(de_out))
+    assert [p.name for p in de_out.iterdir()] == ["piece_7__de_pred.parquet"]
+
+
+def test_score_piece_creates_a_missing_de_out_directory(tmp_path, monkeypatch):
+    """de_out is created when missing, like partial_out, rather than failing at the write."""
+    d, cfg, bundle = _de_only_cfg_and_bundle(tmp_path)
+    stopped = _stop_at_prepare_de(monkeypatch)
+    de_out = tmp_path / "not" / "yet" / "there"
+    with pytest.raises(stopped):
+        partition_inmem.score_piece(_piece_on_bundle_genes(), d, config=cfg, bundle=bundle,
+                                    piece_id="ctx_0", de_out=str(de_out))
+    assert (de_out / "ctx_0__de_pred.parquet").is_file()
+
+
+@pytest.mark.parametrize("piece_id", ["../escape", "sub/dir", "", ".", ".."])
+def test_score_piece_refuses_a_non_bare_piece_id_before_any_work(tmp_path, monkeypatch, piece_id):
+    """piece_id names files in both sinks, so one with a directory part (or "", ".", "..") is
+    refused before ANY work -- config resolution is made to explode, so a check that ran later
+    would surface as that AssertionError instead. Nothing may be written outside the sink."""
+    def _must_not_be_reached(*a, **k):
+        raise AssertionError("score_piece did work before checking piece_id")
+
+    monkeypatch.setattr(partition_inmem, "_require_partition_config", _must_not_be_reached)
+    de_out = tmp_path / "sink" / "de_parts"
+    with pytest.raises(ValueError, match="piece_id must be a bare name"):
+        partition_inmem.score_piece(_piece(), str(tmp_path), config=_cfg(target_sum=1e6),
+                                    piece_id=piece_id, de_out=str(de_out))
+    assert not de_out.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_score_piece_in_memory_piece_with_a_sink_needs_a_piece_id_up_front(tmp_path, monkeypatch):
+    """An in-memory piece has no file stem, so either sink without a piece_id is refused at the
+    start -- before the fix, partial_out raised only after the whole piece had been scored."""
+    def _must_not_be_reached(*a, **k):
+        raise AssertionError("score_piece did work before checking piece_id")
+
+    monkeypatch.setattr(partition_inmem, "_require_partition_config", _must_not_be_reached)
+    for sink in ({"de_out": str(tmp_path / "de")}, {"partial_out": str(tmp_path / "parts")}):
+        with pytest.raises(ValueError, match="explicit piece_id for in-memory pred pieces"):
+            partition_inmem.score_piece(_piece(), str(tmp_path), config=_cfg(target_sum=1e6),
+                                        **sink)
 
 
 def test_bundle_identity_hash_excludes_only_target_sum(tmp_path):

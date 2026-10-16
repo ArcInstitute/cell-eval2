@@ -8,7 +8,8 @@ DIRECTIONLESS = {"de_wilcoxon_nsig_counts_real", "de_wilcoxon_nsig_counts_pred",
 
 
 def test_every_spec_has_a_scoring_policy():
-    assert len(CATALOG) == 95          # 13 anndata literals + 41 per DE family x 2
+    assert len(CATALOG) == 98          # 13 anndata + 41 per DE family x 2
+                                       #   + 2 cell_cov (#386 B4) + 1 cell_cov_ccc
     assert all(isinstance(s.scoring, Scoring) for s in CATALOG.values())
 
 
@@ -29,6 +30,12 @@ _COMPONENT_DIAGNOSTICS = {
     "expr_mse_unbiased", "expr_mse_unbiased_capped", "expr_distance_unbiased",
 }
 _ANNDATA_DIAGNOSTICS = _COMPONENT_DIAGNOSTICS | {"expr_real_mass_ratio"}
+# The B4 covariance pair (#386 §4) is unscored ENTIRELY, both members -- not a diagnostic
+# beside a scored comparison like the two families above. `cell_cov_eig_ratio`'s ideal is
+# 1.0 rather than an extremum, so it has no coherent `direction` even in principle; and
+# docs/metrics.md §6a rules that a family grading emission realism earns enrolment on its
+# own measured ceiling and baseline, which is work this catalog entry does not do.
+_CELL_COV_DIAGNOSTICS = {"cell_cov_corr", "cell_cov_eig_ratio", "cell_cov_ccc"}
 
 
 def test_enrolment_implies_a_direction_but_not_conversely():
@@ -57,7 +64,7 @@ def test_enrolment_implies_a_direction_but_not_conversely():
     assert len(scored) == 87
     # `_UNSCORED` is the four DE directionless entries: it is reused below against a
     # DE-only `former_none` set, where a fifth member would be wrong.
-    assert set(CATALOG) - scored == _UNSCORED | _ANNDATA_DIAGNOSTICS
+    assert set(CATALOG) - scored == _UNSCORED | _ANNDATA_DIAGNOSTICS | _CELL_COV_DIAGNOSTICS
     # scored => has a direction. The converse holds today but is NOT guaranteed by the type,
     # so the empty third state is asserted explicitly: a future directional-but-unscored
     # entry must update this test deliberately rather than slip in under a passing count.
@@ -65,7 +72,8 @@ def test_enrolment_implies_a_direction_but_not_conversely():
         if spec.scoring.scored:
             assert spec.scoring.direction is not None, name
     assert {n for n, s in CATALOG.items()
-            if s.scoring.direction is None} == _UNSCORED | _ANNDATA_DIAGNOSTICS
+            if s.scoring.direction is None} == (_UNSCORED | _ANNDATA_DIAGNOSTICS
+                                                | _CELL_COV_DIAGNOSTICS)
     assert {n for n, s in CATALOG.items()
             if s.scoring.direction is not None and not s.scoring.scored} == set()
     lower = {n for n, s in CATALOG.items() if s.scoring.scored and s.scoring.direction == "lower"}

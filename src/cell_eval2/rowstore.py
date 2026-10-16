@@ -226,6 +226,9 @@ def score_rowstore(staging_dir, *, config=None, mem_budget, output_space="scaled
     cfg = config if config is not None else EvalConfig.from_preset("cell-eval-0.7.6")
     if cfg.pert_col == "target":                       # row-store obs uses "perturbation"
         cfg = _replace(cfg, pert_col="perturbation")
+    # Before any row store is read (#395): this driver carries no cells.
+    from .run import _refuse_cell_metrics_up_front
+    cfg = _refuse_cell_metrics_up_front(cfg, driver="score_rowstore (partitioned in-memory)")
     if output_space == "scaled_log1p":
         itype = "lognorm"
     elif output_space == "raw":

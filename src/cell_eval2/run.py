@@ -5,7 +5,7 @@ import logging
 import math
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import fields, replace
 
 import anndata as ad
@@ -26,6 +26,8 @@ from .metrics.delta import distance_unbiased, mse_unbiased, mse_unbiased_capped
 from .metrics.discrimination import discrimination_score
 from .prep import (pseudobulk, pseudobulk_bulk_lognorm,
                    pseudobulk_bulk_lognorm_with_moments, pseudobulk_with_moments)
+from .real_gate import (GateResult, constant_delta_prediction, constant_prediction,
+                        evaluate_de_gate, evaluate_delta_gate, outside_summary)
 from .streaming_bulk import inmem_pseudobulk
 
 logger = logging.getLogger(__name__)
@@ -475,6 +477,8 @@ def dispatch_anndata_metrics(names, pred_bulks, real_bulks, genes, cfg,
             continue   # produced at aggregation time from its components; it has no func
         if spec.kind == "de":
             continue
+        if spec.kind == "cell":
+            continue   # raw-cell metrics ride dispatch_cell_metrics, not the pseudobulk path
         if spec.kind != "anndata":
             raise NotImplementedError(f"metric kind {spec.kind!r} not supported in this unit")
         out_name = spec.v1_name if (cfg.version == "v1" and spec.v1_name) else spec.name
@@ -539,30 +543,218 @@ def dispatch_anndata_metrics(names, pred_bulks, real_bulks, genes, cfg,
             sig = inspect.signature(spec.func)
             kwargs = {k: v for k, v in available.items() if k in sig.parameters}
             result = spec.func(**kwargs)
-        # v2 no-droppable-NaN (issue #92, mirrors #89): map a degenerate/NaN pert to the
-        # metric's worst value so it penalizes rather than vanishing from the aggregate mean.
-        # v1 keeps the upstream NaN behavior (parity); raw metric funcs stay unchanged.
-        if cfg.version != "v1" and spec.worst_value is not None:
+        # v2 no-droppable-NaN (issue #92, mirrors #89), gated by the REFERENCE since #391: a
+        # perturbation whose reference delta cannot carry a correlation is NaN (not scored), and
+        # inside the gate a prediction-side NaN, or a predicted delta that is constant (checked
+        # exactly: scipy does not reliably return NaN for one), still takes the worst value. v1
+        # keeps the upstream NaN behavior (parity); raw metric funcs stay unchanged.
+        if cfg.version != "v1" and (spec.worst_value is not None or spec.real_gate is not None):
             perts = [p_str for p in pred_bulk[0] if (p_str := str(p)) != cfg.control]
-            result = _fill_no_drop(result, perts, spec.worst_value)
+            inside, constant = None, frozenset()
+            if spec.real_gate is not None:
+                gate = evaluate_delta_gate(real_bulk, control=cfg.control, perts=perts)
+                constant = constant_delta_prediction(
+                    pred_bulk, real_bulk=real_bulk, control=cfg.control,
+                    control_source=cfg.control_source, inside=gate.inside)
+                _log_gate(spec.name, gate, constant, n=len(perts))
+                inside = gate.inside
+            result = _fill_no_drop(result, perts, spec.worst_value, inside=inside,
+                                   constant=constant, metric=spec.name)
         for pert, value in result.items():
             rows.append({"perturbation": pert, "metric": out_name, "value": float(value)})
     return rows
 
 
-def _fill_no_drop(result: dict[str, float], perturbations, worst_value: float) -> dict[str, float]:
-    """v2 no-droppable-NaN (issue #89): every in-scope pert gets a finite value; a pert
-    that is missing from ``result``, mapped to ``None``, or present with a NaN value maps
-    to the metric's worst value. ``result.get(p)`` folds the missing and ``None`` cases
-    into a single lookup (both surface as ``None``, and both map to worst); ``val != val``
-    is the import-free NaN test (NaN is the only value not equal to itself). Rebuilding
-    from ``perturbations`` also drops any stray key not in scope. Never called on the
-    v1/parity path, which keeps the upstream omit/NaN behavior."""
+def _fill_no_drop(result: dict[str, float], perturbations, worst_value: float | None, *,
+                  inside=None, constant=frozenset(), metric: str | None = None
+                  ) -> dict[str, float]:
+    """v2 no-droppable-NaN (issue #89), gated by the reference since #391.
+
+    Every in-scope perturbation gets exactly one value, and rebuilding from ``perturbations``
+    drops any stray key not in scope. ``result.get(p)`` folds the missing and ``None`` cases into
+    one lookup; ``val != val`` is the import-free NaN test.
+
+    * ``inside=None`` -- the ungated rule (#89): a perturbation missing from ``result``, mapped to
+      ``None``, or NaN takes ``worst_value``.
+    * ``inside`` given -- a reference-only gate's admitted set (`real_gate`). A perturbation
+      OUTSIDE it is NaN whatever ``result`` holds: the reference cannot score it, so it is not
+      scored. Inside it, one in ``constant`` (spec §5.2: the prediction is constant over the
+      gate) takes ``worst_value``, and every other one follows the ungated rule -- except that a
+      metric declaring no ``worst_value`` RAISES on an undefined value there (spec §5.3), because
+      for such a metric that is unreachable by construction and a NaN would otherwise read as
+      "not scored".
+
+    Never called on the v1/parity path, which keeps the upstream omit/NaN behavior.
+    """
     out: dict[str, float] = {}
     for p in perturbations:
+        if inside is not None and p not in inside:
+            out[p] = float("nan")
+            continue
+        if p in constant:
+            out[p] = worst_value
+            continue
         val = result.get(p)
-        out[p] = worst_value if (val is None or val != val) else val
+        # Inside a gate the contract is FINITE (spec §5.1/§5.3), so +/-inf is undefined too; the
+        # ungated rule keeps its historical NaN-only test (Copilot, PR #401).
+        if val is None or val != val or (inside is not None and not math.isfinite(val)):
+            if worst_value is None:
+                raise RuntimeError(
+                    f"{metric or 'metric'}: perturbation {p!r} is inside the reference-only gate "
+                    f"but the metric returned {val!r}, and the metric declares no worst_value "
+                    "because no prediction can make it undefined there (spec §5.3). Something "
+                    "upstream changed what this metric can return; fix that rather than "
+                    "letting the NaN read as 'not scored'."
+                )
+            out[p] = worst_value
+        else:
+            out[p] = val
     return out
+
+
+def _reject_cell_metrics(names, driver: str) -> None:
+    """Raise if a raw-cell metric was requested on a driver that has no cells.
+
+    Cell-kind metrics (the ``cell_cov_*`` family) need random row access to BOTH sides'
+    single cells. Only the in-memory ``compute_metrics`` path carries them; the streaming
+    (``scale.py``) and partitioned (``partition_inmem.py``) drivers hold pseudobulk / a
+    persisted real reference and no cells, so they fail loudly rather than silently drop
+    the metric -- mirroring ``_reject_moments_metrics``.
+    """
+    blocked = sorted(n for n in names if n in CATALOG and CATALOG[n].kind == "cell")
+    if blocked:
+        raise NotImplementedError(
+            f"metric(s) {blocked} need raw single cells, which the {driver} driver does not "
+            "carry. Use the in-memory scorer (compute_metrics), or deselect these metrics."
+        )
+
+
+def _cell_block_validator(cfg, effective_types):
+    """The in-memory path's input validation, as a ``(side, block)`` check for every block of
+    cells a cell metric gathers -- or None when validation is off (``validate_input=False``, v1).
+
+    Cell metrics read only the cells they sample, so on the cell-layout fast path, and for a
+    backed input, no whole-matrix pass ever validates those cells. The checks are the ones
+    ``_run_metrics`` runs up front: the value checks of ``norm.validate_input_type`` (with
+    ``allow_fractional_counts`` for the pred side only) and the ``max_counts_per_cell`` limit.
+    """
+    if not cfg.validate_input or cfg.version == "v1":
+        return None
+
+    def validate(side, block):
+        adata = ad.AnnData(X=block)
+        _norm.validate_input_type(adata, effective_types[side],
+                                  allow_fractional=_val_allow_fractional(cfg, side=side))
+        _norm.check_scale_limit(adata, effective_types[side], cfg.max_counts_per_cell)
+
+    return validate
+
+
+def _cell_row_source(adata):
+    """The :class:`~cell_eval2.cell_rowsource.AnnDataSource` the cell dispatch reads one side
+    through.
+
+    A backed, NON-view AnnData whose X is CSR or dense is wrapped as it is: a sorted row request
+    reads just those rows from h5py. Anything else backed is materialized ONCE here, because
+    row reads would not be bounded: anndata reads a CSC-backed X whole for a row subset, and a
+    backed VIEW materializes the entire view on every ``.X`` access -- so wrapping either would
+    repeat a whole-matrix read per perturbation. ``.X`` is never touched on a view.
+    """
+    from .cell_rowsource import AnnDataSource
+
+    if getattr(adata, "isbacked", False):
+        if adata.is_view or getattr(adata.X, "format", "csr") != "csr":
+            return AnnDataSource(_materialize(adata))
+    return AnnDataSource(adata)
+
+
+def _refuse_cell_metrics_up_front(cfg, *, driver: str):
+    """Refuse cell metrics before a cell-less driver reads any input, and return ``cfg`` with a
+    one-shot iterable selection frozen to a list -- the caller keeps it, so its own later
+    resolutions still see the selection. Every partitioned entry point and reference builder
+    calls this first: refusing only inside ``score_piece`` came after a whole real-reference
+    build, DE included (Copilot, #395)."""
+    if not isinstance(cfg.metrics, (str, list, tuple)):
+        cfg = replace(cfg, metrics=list(cfg.metrics))
+    _reject_cell_metrics(resolve_metrics(cfg.metrics, version=cfg.version)[0], driver=driver)
+    return cfg
+
+
+def dispatch_cell_metrics(names, pred_source, real_source, cfg, *, effective_types,
+                          genes=None, driver="unspecified") -> list[dict]:
+    """Run the cell-kind metrics in ``names`` over raw pred/real cell sources.
+
+    Cell metrics need random ROW access (per-perturbation gathers, column-sliced marker
+    streaming), which the pseudobulk dispatch cannot supply, so they ride this separate
+    path fed by ``cell_rowsource`` handles. ``pred_source``/``real_source`` are
+    ``CellSource`` instances; ``effective_types`` is the ``{'pred','real'}`` resolved
+    input-type dict. Non-cell names are skipped. Each metric FAMILY computes its side
+    tables once and shares them through ``cache`` (e.g. ``cell_cov_corr`` and
+    ``cell_cov_eig_ratio`` cost one pass over the cells, not two). Tidy rows, mirroring
+    ``dispatch_anndata_metrics``.
+
+    ``genes`` is the shared gene axis (``pred_ad.var.index``, already validated identical on
+    both sides by ``io.validate_pair``); with ``target_gene_map`` it is what lets a cell
+    metric resolve and exclude each perturbation's OWN gene through
+    ``distances.resolve_exclusion_columns``, the same definition ``pds_*`` uses (#386 §2.3).
+    Defaulted to the real side's ``var_names`` so a direct caller that has only the two
+    sources keeps working; every production driver passes the validated axis.
+    """
+    cell_names = [n for n in names if CATALOG[n].kind == "cell"]
+    if not cell_names:
+        return []
+    cache: dict = {}
+    available = {
+        "pred_source": pred_source,
+        "real_source": real_source,
+        "_cell_metric_cache": cache,
+        "pert_col": cfg.pert_col,
+        "control": cfg.control,
+        "input_type_pred": effective_types["pred"],
+        "input_type_real": effective_types["real"],
+        "genes": (np.asarray(real_source.var_names, dtype=str) if genes is None
+                  else np.asarray(genes, dtype=str)),
+        "target_gene_map": cfg.target_gene_map,
+        # Resolved device for the cell metrics that offer a GPU path (cell_cov_ccc). Only
+        # metrics whose signature declares `device` receive it (the kwargs filter below), so
+        # the CPU-only cell families are unaffected. `_cache_device` resolves "auto" to
+        # cuda/cpu and passes an explicit device verbatim.
+        "device": _cache_device(cfg),
+        "_validate_cells": _cell_block_validator(cfg, effective_types),
+    }
+    perts = [p for p in np.unique(real_source.obs[cfg.pert_col].astype(str)).tolist()
+             if p != cfg.control]
+    rows: list[dict] = []
+    for name in cell_names:
+        spec = CATALOG[name]
+        sig = inspect.signature(spec.func)
+        kwargs = {k: v for k, v in available.items() if k in sig.parameters}
+        result = spec.func(**kwargs)
+        if cfg.version != "v1" and spec.worst_value is not None:
+            result = _fill_no_drop(result, perts, spec.worst_value)
+        for pert, value in result.items():
+            rows.append({"perturbation": pert, "metric": spec.name, "value": float(value)})
+    return rows
+
+
+def _log_gate(name: str, gate: GateResult, constant, *, n: int) -> None:
+    """Report a gate's exclusions by reason, and any constant-prediction charges (#391).
+
+    Substituting or withholding a value must never be invisible -- `de_lfc_nmae`'s rule, and the
+    same wording: the gate is reference-only, so its set is the same for every submission.
+    """
+    if gate.outside:
+        logger.warning(
+            "%s: %d of %d perturbation(s) not scored -- outside the reference-only gate (%s). "
+            "The gate reads the reference alone, so this set is the same for every submission "
+            "(issue #391).", name, len(gate.outside), n, outside_summary(gate),
+        )
+    if constant:
+        logger.warning(
+            "%s: %d perturbation(s) charged the worst value -- the prediction is constant over "
+            "the gate, so the correlation is undefined (issue #391; neither polars nor scipy "
+            "reliably returns NaN for a constant input).", name, len(constant),
+        )
 
 
 def _effective_de_spec(name, backend):
@@ -619,10 +811,17 @@ def dispatch_de_metrics(names, prepared_de, cfg) -> list[dict]:
         sig = inspect.signature(spec.func)
         kwargs = {k: v for k, v in de_available.items() if k in sig.parameters}
         result = spec.func(**kwargs)
-        # v2 no-droppable-NaN (issue #89): map omitted/NaN perts to the metric's worst
-        # value so they penalize rather than vanish from the aggregate mean. v1 keeps the
-        # upstream omit/NaN behavior (parity), so the raw funcs stay byte-for-byte unchanged.
-        if cfg.version != "v1" and spec.worst_value is not None:
+        # v2 no-droppable-NaN (issue #89), gated by the REFERENCE since #391: outside the gate a
+        # perturbation is NaN (not scored); inside it an omitted/NaN value, or a prediction that
+        # is constant over the gate, takes the worst value. v1 keeps the upstream omit/NaN
+        # behavior (parity), so the raw funcs stay byte-for-byte unchanged.
+        if cfg.version != "v1" and spec.real_gate is not None:
+            gate = evaluate_de_gate(prepared_de, spec.real_gate)
+            constant = constant_prediction(prepared_de, spec.real_gate, gate.inside)
+            _log_gate(spec.name, gate, constant, n=len(prepared_de.perturbations))
+            result = _fill_no_drop(result, prepared_de.perturbations, spec.worst_value,
+                                   inside=gate.inside, constant=constant, metric=spec.name)
+        elif cfg.version != "v1" and spec.worst_value is not None:
             result = _fill_no_drop(result, prepared_de.perturbations, spec.worst_value)
         for pert, value in result.items():
             rows.append({"perturbation": pert, "metric": out_name, "value": float(value)})
@@ -1351,6 +1550,95 @@ _ONTARGET_EXCLUDING_FUNCS = (de_sig_jaccard, de_lfc_nmae, mse_unbiased, mse_unbi
 #: comparator, which DE backend), never by what the data turns out to hold.
 _GROUPED_SUM_REDUCTION_SEMANTICS = 1
 
+#: #391. Bump when what a `real_gate.RealGate` admits, or what the v2 fill does inside or outside
+#: it, changes meaning WITHOUT a catalog field changing. The catalog half -- each requested
+#: metric's gate and `worst_value` -- enters every key BY VALUE through `_no_drop_policy`, so a
+#: retuned floor or worst value moves the key with nothing to remember (the
+#: `reach_purity_floor` precedent). Not `ground_truth_cache.identity.REAL_DE_SEMANTICS_VERSION`:
+#: the reference DE table itself does not change, only how metrics score on top of it.
+_REAL_GATE_SEMANTICS = 1
+
+#: #397. Bump when what a `None` value in `target_gene_map` -- or the map's `"*"` key -- MEANS
+#: changes. 1 = issue #397: a `None` value declares that a label has no target gene, and
+#: `{"*": None}` (`config.NO_TARGET_GENE_WILDCARD`) declares it for every label without an entry of
+#: its own. Before #397 `"*"` was an ordinary label, so `{"*": None}` digests identically on both
+#: sides of the change while computing something else: on a panel whose labels are measured genes,
+#: the old reading still excluded each label's own gene. MEASURED with the `full` profile on such a
+#: pair: 43 of 265 rows (12 metrics) move. A per-label `None` already matched no gene and moves
+#: nothing (265 of 265 identical), except on a panel with a feature literally named "None", which
+#: the PDS resolver's `str()` used to match.
+#:
+#: ⚠️ The same hole its siblings above were minted for, and neither the version string nor
+#: `competition_digest()` covers it: the result cache keys on (inputs + config) with
+#: `cell_eval2_version` deliberately absent. Scoped by `_no_target_gene_declared` -- the map holds a
+#: `None` value -- so every gene panel's map, every map-less run and every competition run keeps its
+#: key. It OVER-invalidates a per-label `None` map, which recomputes once to the same numbers: the
+#: side `_ontarget_exclusion_used` errs on too.
+_NO_TARGET_GENE_SEMANTICS = 1
+
+#: #395. Bump when what a cell-kind metric (``metrics/cells.py``) computes changes WITHOUT one of
+#: its knobs changing. The knobs themselves enter the key BY VALUE through `_cell_metric_params`:
+#: they are catalog-bound function defaults rather than `EvalConfig` fields (so they cannot move
+#: `competition_digest()`), which leaves `config_hash` blind to them.
+_CELL_METRIC_SEMANTICS = 1
+
+#: Arguments `dispatch_cell_metrics` injects into a cell metric -- the data, and run-wide settings
+#: the result key already covers through the fingerprints and the config. Every OTHER parameter
+#: of a cell metric is a knob (a function default, or a value bound in the catalog).
+_CELL_RUNTIME_ARGS = frozenset({
+    "pred_source", "real_source", "_cell_metric_cache", "pert_col", "control", "genes",
+    "target_gene_map", "input_type_pred", "input_type_real", "device", "_validate_cells",
+})
+
+
+def _cell_metric_params(names) -> list | None:
+    """Each requested cell metric's EFFECTIVE knobs, by value, for the result-cache key -- or
+    None when no cell metric is requested, so every other run keeps its key.
+
+    Without this a result cached under one binding (say ``significance="intersection"``) would be
+    served after the binding changed. ``[[name, [[knob, value], ...]]]``, sorted.
+    """
+    out = []
+    for n in sorted(n for n in names if n in CATALOG and CATALOG[n].kind == "cell"):
+        func = CATALOG[n].func
+        target = getattr(func, "func", func)            # unwrap a functools.partial
+        knobs = {k: p.default for k, p in inspect.signature(target).parameters.items()
+                 if p.default is not inspect.Parameter.empty}
+        knobs.update(getattr(func, "keywords", None) or {})
+        out.append([n, sorted([k, v] for k, v in knobs.items() if k not in _CELL_RUNTIME_ARGS)])
+    return out or None
+
+
+def _no_drop_policy(names, version: str, de_backend: str | None = None) -> list | None:
+    """The v2 fill/gate policy of the metrics a run will DISPATCH, by value -- or None.
+
+    Built from the EFFECTIVE specs: under ``de.backend="deseq2"`` a requested ``de_wilcoxon_*``
+    name dispatches through its ``de_deseq2_*`` sibling (`_effective_de_spec`), so it is that
+    sibling's gate and worst value the results depend on. None under v1 (no fill, no gate) and
+    when no dispatched metric carries a GATE: a run whose behaviour #391 did not change keeps its
+    warm cache, and every `vcc` and `vcc2026` run is one of them. Otherwise
+    ``[[name, worst_value, gate payload]]`` for every dispatched metric carrying either, sorted.
+    Shared by the result cache and the anchor identity so the two cannot disagree.
+    """
+    if version == "v1":
+        return None
+    specs, seen = [], set()
+    for n in names:
+        if n not in CATALOG:
+            continue
+        spec = CATALOG[n]
+        if spec.kind == "de" and de_backend is not None:
+            spec = _effective_de_spec(n, de_backend)
+        if spec.name not in seen:
+            seen.add(spec.name)
+            specs.append(spec)
+    if not any(s.real_gate is not None for s in specs):
+        return None
+    return sorted(
+        [s.name, s.worst_value, None if s.real_gate is None else s.real_gate.payload()]
+        for s in specs if s.worst_value is not None or s.real_gate is not None
+    )
+
 
 def _grouped_sum_reduction_used(*, comparator, de_backend) -> bool:
     """Whether a run's numbers could depend on #271's group-sum reduction semantics.
@@ -1472,9 +1760,23 @@ def _discrimination_exclusion_used(cfg, names) -> bool:
     return any(_is_discrimination(CATALOG[n].func) for n in names)
 
 
+def _no_target_gene_declared(cfg) -> bool:
+    """Whether ``cfg.target_gene_map`` declares any label to have no target gene (#397).
+
+    True when the map holds a ``None`` value: ``{"*": None}`` or a per-label ``None``. Read off the
+    map alone, and it OVER-invalidates like `_ontarget_exclusion_used`: whether a declared label is
+    on the panel, or a feature named "None" is in the index, is not known at digest time -- the key
+    is computed before the bulks are built. Shared by the result cache and the anchor identity so
+    the two cannot disagree.
+    """
+    m = cfg.target_gene_map
+    return isinstance(m, Mapping) and any(v is None for v in m.values())
+
+
 def _result_config_digest(
     cfg, *, de_backend_used: bool, comparator: str, pds_exclusion_used: bool = False,
     ontarget_exclusion_used: bool = False, reach_floor_used: bool = False,
+    no_drop_policy: list | None = None, cell_params: list | None = None,
 ) -> str:
     """config_hash for the result cache key. The DEVICE always enters the key (via _cache_device:
     "auto" is resolved to cuda/cpu, an explicit device is used verbatim) -- fp32 GPU vs fp64 CPU
@@ -1553,7 +1855,139 @@ def _result_config_digest(
         # enters the key at all, and deseq2 is never auto-selected, so the two agree whenever a
         # deseq2 table could have been built.
         d["grouped_sum_reduction_semantics"] = _GROUPED_SUM_REDUCTION_SEMANTICS
+    if no_drop_policy is not None:
+        # #391. Scoped like the five terms above: a v1 run, or one requesting no gated or
+        # worst-valued metric (every `vcc`/`vcc2026` run), keeps its warm cache. The catalog half
+        # is BY VALUE (`_no_drop_policy`); the counter covers code changes no field can see.
+        d["no_drop_policy"] = no_drop_policy
+        d["real_gate_semantics"] = _REAL_GATE_SEMANTICS
+    if _no_target_gene_declared(cfg):
+        # #397. Scoped like the six terms above, but by the MAP rather than the metrics: the map
+        # itself enters this key whenever it is set, so the term rides with it. A map that declares
+        # nothing -- every gene panel's -- and every map-less run keep their warm cache.
+        d["no_target_gene_semantics"] = _NO_TARGET_GENE_SEMANTICS
+    if cell_params is not None:
+        # #395. Scoped by the request like the terms above: only a run selecting a cell-kind
+        # metric gets it, so every other run keeps its warm cache. Knobs BY VALUE, plus the
+        # counter for a change no knob can see.
+        d["cell_metric_params"] = cell_params
+        d["cell_metric_semantics"] = _CELL_METRIC_SEMANTICS
     return config_hash(d)
+
+
+def _cell_stream_eligible(pred, real, cfg) -> bool:
+    """Whether (pred, real) can take the streaming cell-metric fast path: both are cell-layout
+    (``.shad``) PATHS and every selected metric is ``kind='cell'``. A non-path or non-cell-layout
+    input, or any pseudobulk/DE/anndata metric in the selection, returns False (the in-memory
+    path handles those). ``cell_layout`` does not import cellstream for a ``.h5ad``, so this is
+    free on the ordinary path; for a ``.shad`` it needs the reader exactly as the fallback would.
+    """
+    if not (isinstance(pred, (str, os.PathLike)) and isinstance(real, (str, os.PathLike))):
+        return False
+    from ._cell_archive import cell_layout
+
+    if not (cell_layout(pred) and cell_layout(real)):
+        return False
+    names, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
+    return bool(names) and all(CATALOG[n].kind == "cell" for n in names)
+
+
+def _cell_archive_pert_col(pred, real, cfg):
+    """The config a cell-layout fast-path run scores under, resolved ONCE for every reader.
+
+    A cell archive is grouped by a fixed column (``manifest['group_by']``, e.g. 'perturbation'
+    on some archives, 'target' on others). When the caller left ``pert_col`` at the EvalConfig
+    default 'target', the pair takes the fast path (`_cell_stream_eligible`), the archives group
+    by something else and NEITHER carries a 'target' column, this returns ``cfg`` with that
+    grouping column -- the convenience ``score_cellstream`` applies, but driven by the archive
+    instead of hard-coded. Otherwise ``cfg`` unchanged: an archive that DOES carry 'target' keeps
+    it, since scoring by another column would change which cells form a perturbation.
+
+    `compute_metrics` and the CLI both call it, the CLI BEFORE `build_run_meta`, so provenance
+    reads the same column the scoring does.
+    """
+    if cfg.pert_col != "target" or not _cell_stream_eligible(pred, real, cfg):
+        return cfg
+    import contextlib
+
+    from .cell_rowsource import CellStoreSource
+
+    with contextlib.ExitStack() as stack:
+        srcs = []
+        for path in (pred, real):
+            src = CellStoreSource(path, gather_threads=cfg.gather_threads)
+            stack.callback(src.close)
+            srcs.append(src)
+        group_by = srcs[0]._store.manifest.get("group_by")
+        if (group_by and group_by != "target"
+                and all("target" not in src.obs.columns for src in srcs)):
+            return replace(cfg, pert_col=group_by)
+    return cfg
+
+
+def _cell_archive_input_type(src, cfg) -> str:
+    """Auto-detect a cell-layout archive's input type from the SAME rows `norm.guess_is_lognorm`
+    samples from a materialized matrix (its own ``n_cells``/``seed`` defaults), so the archive
+    path and the in-memory path decide alike. A fixed peek at the first rows would not: an archive
+    is grouped, so those rows can all be control cells."""
+    defaults = inspect.signature(_norm.guess_is_lognorm).parameters
+    n_cells, seed = defaults["n_cells"].default, defaults["seed"].default
+    n = int(src.n_obs)
+    rows = (np.arange(n) if n <= n_cells
+            else np.sort(np.random.default_rng(seed).choice(n, size=n_cells, replace=False)))
+    return _norm.resolve_input_type(
+        ad.AnnData(X=src.gather_rows(rows)), declared=cfg.input_type, version=cfg.version,
+        allow_discrete=cfg.allow_discrete, autodetect=True)
+
+
+def _run_cell_metrics_streaming(pred, real, cfg) -> pl.DataFrame:
+    """Score an all-cell-metric selection on a cell-layout (``.shad``) pair WITHOUT materializing
+    either side: open each as a streaming :class:`~cell_eval2.cell_rowsource.CellStoreSource` and
+    dispatch the cell metrics against it. Structural validation (gene axis, perturbation sets,
+    control) IS ``io.validate_pair``, on the archives' ``var`` and ``obs`` -- no payload decode,
+    and no requirement that an archive be STORED grouped by ``pert_col``: the cell metrics
+    gather rows by label, so an archive grouped by another column scores as its materialized
+    read does. Writes ``run_params.yaml`` like the in-memory tail; results.csv is written by the CLI
+    from the returned frame."""
+    import contextlib
+
+    from .cell_rowsource import CellStoreSource
+
+    names, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
+    for field, value in (("cache_real", cfg.cache_real), ("cache_pred", cfg.cache_pred)):
+        if value:
+            logger.warning(
+                "%s=%r is not used: scoring only cell metrics on two cell-layout archives reads "
+                "them directly and keeps no cache, so this run recomputes everything.",
+                field, value)
+
+    # An ExitStack, so a REAL archive that fails to open still closes the pred one.
+    with contextlib.ExitStack() as stack:
+        pred_src = CellStoreSource(pred, gather_threads=cfg.gather_threads)
+        stack.callback(pred_src.close)
+        real_src = CellStoreSource(real, gather_threads=cfg.gather_threads)
+        stack.callback(real_src.close)
+        # `cfg.pert_col` arrives resolved by `_cell_archive_pert_col` (compute_metrics, and the
+        # CLI before it builds provenance).
+        validate_pair(pred_src, real_src, pert_col=cfg.pert_col, control=cfg.control)
+        # The in-memory path's rule (`_effective_input_type`): the DECLARED type, unless v1 or
+        # the pred side under `autodetect_input_type` asks for detection.
+        effective_types = {
+            side: (_cell_archive_input_type(src, cfg)
+                   if cfg.version == "v1" or _effective_autodetect(cfg, side=side)
+                   else cfg.input_type)
+            for side, src in (("pred", pred_src), ("real", real_src))
+        }
+        rows = dispatch_cell_metrics(
+            names, pred_src, real_src, cfg, effective_types=effective_types,
+            genes=np.asarray(real_src.var_names, dtype=str),
+            driver="compute_metrics (cellstream)")
+
+    df = pl.DataFrame(rows, schema=_TIDY_SCHEMA) if rows else pl.DataFrame(schema=_TIDY_SCHEMA)
+    if cfg.outdir:
+        os.makedirs(cfg.outdir, exist_ok=True)
+        cfg.to_yaml(os.path.join(cfg.outdir, "run_params.yaml"))
+    return df
 
 
 def compute_metrics(
@@ -1577,6 +2011,10 @@ def compute_metrics(
     would silently override the partial.
     """
     cfg = _resolve_config(config, overrides)
+    # A one-shot iterable selection is resolved more than once below (the cell-layout routing,
+    # then the scorer it routes to), so freeze it into a list first (Copilot, #395).
+    if not isinstance(cfg.metrics, (str, list, tuple)):
+        cfg = replace(cfg, metrics=list(cfg.metrics))
     # Checked before anything is loaded, so a long run cannot do all its work and only then
     # find it has nowhere to put the tables. outdir=None means "the API writes nothing", so
     # defaulting it here would silently drop files into the CWD of whoever imported us --
@@ -1586,6 +2024,17 @@ def compute_metrics(
             "write_de=True requires an output directory, but config.outdir is None; "
             "set EvalConfig(outdir=...) (the `cell-eval2 run` CLI always sets one)"
         )
+
+    # Streaming fast path: a cell-layout (.shad) pair whose selected metrics are ALL raw-cell
+    # metrics needs neither the pseudobulk/DE machinery nor a full in-RAM materialize of either
+    # side -- the cell metrics read only the per-perturbation cells they sample, straight from the
+    # archive via CellStoreSource.gather_rows. load_anndata(.shad) would otherwise materialize both
+    # 1.3M-cell sides up front (measured 460 s / 197 GB on the NGN2 D40 pair) before the first
+    # metric runs. Non-cell-layout inputs, or any selection that also includes a pseudobulk/DE
+    # metric, fall through to the in-memory path below unchanged.
+    if _cell_stream_eligible(pred, real, cfg):
+        return _run_cell_metrics_streaming(pred, real, _cell_archive_pert_col(pred, real, cfg))
+
     real_store = CacheStore(cfg.cache_real) if cfg.cache_real else None
     pred_store = CacheStore(cfg.cache_pred) if cfg.cache_pred else None
 
@@ -1638,13 +2087,18 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
 
     _warn_mixed_library_scale(cfg, effective_types)
 
-    # Resolve before cache keys are built, so the resolved number enters them and flows to
-    # DE, both sides' pseudobulk, and _pred_de_input's scale conversion.
-    cfg = _resolve_target_sum_from_control(cfg, real_ad)
-
     names, missing = resolve_metrics(cfg.metrics, version=cfg.version)
     if missing:
         logger.warning("Skipping not-yet-implemented metrics: %s", missing)
+    # Cell metrics only (#395): they normalize to a fixed CP10K and read no `target_sum`.
+    cell_only = bool(names) and all(CATALOG[n].kind == "cell" for n in names)
+
+    # Resolve before cache keys are built, so the resolved number enters them and flows to
+    # DE, both sides' pseudobulk, and _pred_de_input's scale conversion. Not for a cell-only
+    # selection: `target_sum=None` would materialize the real control pool for a number no
+    # selected metric reads.
+    if not cell_only:
+        cfg = _resolve_target_sum_from_control(cfg, real_ad)
     comparator = _norm.resolve_comparator(
         version=cfg.version,
         pred_input_type=effective_types["pred"],
@@ -1694,6 +2148,8 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
                 pds_exclusion_used=_discrimination_exclusion_used(cfg, names),
                 ontarget_exclusion_used=_ontarget_exclusion_used(names),
                 reach_floor_used=_reach_floor_used(names),
+                no_drop_policy=_no_drop_policy(names, cfg.version, cfg.de.backend),
+                cell_params=_cell_metric_params(names),
             ),
             metric_names=names)
         cached = pred_store.get("results", fingerprint=result_fp, params={}, kind="parquet")
@@ -1762,7 +2218,10 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
 
     genes = np.asarray(pred_ad.var.index.values, dtype=str)
     norms = names_norms  # computed above (before the DE section) for the early pred pseudobulk
-    if not norms and real_store is None and pred_store is None:
+    # Cell metrics only (#395, `cell_only` above): they validate every block of cells they read
+    # (`_cell_block_validator`), and the pass below would materialize each backed matrix whole
+    # just to sample at most 500 cells per perturbation from it.
+    if not norms and not cell_only and real_store is None and pred_store is None:
         # DE-only run with NO cache: no normalization materializes a side, but a no-cache
         # run must validate inputs exactly as before — validate path/backed sides one at a
         # time (in-memory sides were validated up front). In cache mode this is skipped:
@@ -1797,6 +2256,17 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
                                          pred_moments=pred_moments,
                                          real_moments=real_moments,
                                          driver="compute_metrics (in-memory)"))
+    # Raw-cell metrics (the cell_cov_* family): random row access to BOTH sides' single
+    # cells, which the pseudobulk dispatch above cannot supply. Only this in-memory driver
+    # carries cells. A BACKED side is read row block by row block where that is cheap (see
+    # `_cell_row_source`): the metrics gather only the rows they sample (and chunked group
+    # summaries), so materializing both whole matrices for them would hold memory proportional
+    # to both datasets for at most 500 cells per perturbation.
+    if any(CATALOG[n].kind == "cell" for n in names):
+        rows.extend(dispatch_cell_metrics(
+            names, _cell_row_source(pred_ad), _cell_row_source(real_ad), cfg,
+            effective_types=effective_types, genes=genes,
+            driver="compute_metrics (in-memory)"))
 
     df = pl.DataFrame(rows, schema=_TIDY_SCHEMA) if rows else pl.DataFrame(schema=_TIDY_SCHEMA)
     if pred_store is not None and result_fp is not None:

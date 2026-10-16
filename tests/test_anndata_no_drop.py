@@ -7,16 +7,16 @@ from cell_eval2.config import EvalConfig
 from cell_eval2.de import prepare_de
 from cell_eval2.run import dispatch_anndata_metrics, dispatch_de_metrics
 
+# #391 removed the worst value from the five entries only the REFERENCE can make undefined
+# (`direction_sensitivity`, `_universe`, `sig_recall`, `pr_auc`, `roc_auc`): their gate decides.
 _NEW_WORST = {"delta_pearson": -1.0, "de_wilcoxon_nsig_spearman": -1.0,
               "de_wilcoxon_lfc_spearman_pos": -1.0, "de_wilcoxon_lfc_spearman_neg": -1.0,
-              "de_wilcoxon_direction_precision": 0.0,
-              "de_wilcoxon_direction_sensitivity": 0.0,
-              "de_wilcoxon_direction_sensitivity_universe": 0.0}
+              "de_wilcoxon_direction_precision": 0.0}
 # from #89 (must remain set):
 _PRIOR_WORST = {
-    "de_wilcoxon_sig_recall": 0.0, "de_wilcoxon_direction_match": 0.0,
+    "de_wilcoxon_direction_match": 0.0,
     "de_wilcoxon_model_direction_match": 0.0,
-    "de_wilcoxon_lfc_spearman": -1.0, "de_wilcoxon_pr_auc": 0.0, "de_wilcoxon_roc_auc": 0.0,
+    "de_wilcoxon_lfc_spearman": -1.0,
 }
 
 
@@ -86,14 +86,17 @@ def _nsig_prep():
     return prepare_de(pred, real, control="non-targeting", p_adj_threshold=0.05)
 
 
-def test_v2_de_dispatch_fills_nsig_spearman_nan_to_worst():
+def test_v2_de_dispatch_does_not_score_nsig_spearman_the_reference_cannot_define():
+    """#391: the two REFERENCE counts are equal (and there are fewer than 10 targets), so the
+    correlation is undefined whatever was predicted -- not scored, every perturbation NaN.
+    Before #391 every submission was charged -1.0 here. The prediction-side case (constant
+    PREDICTED counts) is still charged: `tests/test_real_gate_catalog.py`."""
     prep = _nsig_prep()
     names = ["de_wilcoxon_nsig_spearman"]
     rows = dispatch_de_metrics(names, prep, EvalConfig(metrics=names, version="v2"))
     vals = {r["perturbation"]: r["value"] for r in rows if r["metric"] == "de_wilcoxon_nsig_spearman"}
     assert set(vals) == {"P1", "P2"}
-    assert all(math.isfinite(v) for v in vals.values())
-    assert all(v == -1.0 for v in vals.values())           # degenerate global corr -> worst
+    assert all(math.isnan(v) for v in vals.values())
 
 
 def test_v1_de_dispatch_keeps_nsig_spearman_nan():

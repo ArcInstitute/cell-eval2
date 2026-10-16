@@ -32,8 +32,8 @@ from .de_compute import compute_de_streaming, compute_de_streaming_cell
 from .partition import (PARTIAL_SEMANTICS_KEY, result_semantics, select_subset,
                         write_partial)
 from .run import (_moment_normalizations, _needed_normalizations,
-                  _resolve_config, dispatch_anndata_metrics, dispatch_de_metrics,
-                  effective_normalization)
+                  _reject_cell_metrics, _resolve_config, dispatch_anndata_metrics,
+                  dispatch_de_metrics, effective_normalization)
 from .io import validate_gene_axis
 from .stream import shad_fingerprint, shad_metadata, shad_var_names
 from .streaming_bulk import streaming_pseudobulk
@@ -78,6 +78,9 @@ def score_streaming(pred, real, *, config, subset=None, fraction=None, index=Non
                     partial_out=None, noise=None) -> pl.DataFrame:
     cfg = _resolve_config(config, {})
     names, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
+    # Before any archive read: with target_sum=None the lines below read the real control pool,
+    # which a refused selection must not pay for (Copilot, #395).
+    _reject_cell_metrics(names, driver="score_streaming (shard-stream)")
     effective_types = {
         "pred": _shard_effective_input_type(pred, cfg, side="pred"),
         "real": _shard_effective_input_type(real, cfg, side="real"),
@@ -543,6 +546,7 @@ def score_streaming_cell(pred, real, *, config, subset=None, fraction=None, inde
     comparator = _norm.resolve_comparator(
         version=cfg.version, pred_input_type="counts", real_input_type="counts",
     )
+    _reject_cell_metrics(names, driver="score_streaming_cell (cell-stream)")
     de_names = [n for n in names if CATALOG[n].kind == "de"]
     anndata_names = [n for n in names if CATALOG[n].kind == "anndata"]
     if cfg.cache_real:

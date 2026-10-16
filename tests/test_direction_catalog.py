@@ -76,10 +76,15 @@ def test_entries_are_appended_after_the_v0_5_0_direction_metrics():
 
 
 def test_the_v0_5_0_entries_are_unchanged():
+    # #391: the two sensitivity entries lost their 0.0 -- only the reference (N_conf below the
+    # gate's floor) can make them undefined, so their gate decides. Precision's denominator is
+    # the PREDICTION's, so its 0.0 stays.
+    worst = {"direction_precision": 0.0, "direction_sensitivity": None,
+             "direction_sensitivity_universe": None}
     for suffix in ("direction_precision", "direction_sensitivity",
                    "direction_sensitivity_universe"):
         spec = CATALOG[f"de_wilcoxon_{suffix}"]
-        assert spec.worst_value == 0.0
+        assert spec.worst_value == worst[suffix]
         assert spec.agg == "mean"
         # v2-native (v1_name=None), so NOT offered under version="v1". These three were
         # v1-available only because v1_available was hand-flagged and nobody set it; it is

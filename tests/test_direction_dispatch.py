@@ -1,3 +1,5 @@
+import math
+
 import polars as pl
 
 from cell_eval2.catalog import CATALOG, PROFILES, deseq2_metric_name
@@ -22,12 +24,15 @@ def test_catalog_entries_registered_with_the_agreed_metadata():
         # (v1_name=None -> not v1_available), so only the full/de avg_score sees it.
         "de_wilcoxon_direction_sensitivity_universe": True,
     }
+    worst = {"de_wilcoxon_direction_precision": 0.0,            # prediction-conditioned
+             "de_wilcoxon_direction_sensitivity": None,         # gated since #391
+             "de_wilcoxon_direction_sensitivity_universe": None}
     for name in _NAMES:
         spec = CATALOG[name]
         assert spec.kind == "de"
         assert spec.normalization is None
         assert spec.v1_name is None            # v2-native
-        assert spec.worst_value == 0.0
+        assert spec.worst_value == worst[name]
         assert tuple(spec.profiles) == ("full", "de")
         assert spec.scoring.scored is expected_scored[name]
         assert spec.scoring.direction == "higher"   # all three, scored or not
@@ -52,7 +57,10 @@ def test_deseq2_siblings_exist():
 
 def test_dispatch_fills_omitted_targets_with_the_worst_value_under_v2():
     # G2 has neither a reference-significant nor a model-significant gene, so every metric
-    # omits it; v2 no-drop must fill 0.0 rather than let it vanish from the aggregate.
+    # omits it. Since #391 all three are gated by the REFERENCE, and this fixture is far below
+    # the floor of 10 on every count: the sensitivity pair needs 10 reference-significant genes
+    # (G1 has two, G2 none), precision 10 reference genes with a log2FC direction (two and one).
+    # So nothing here is scored -- NaN rows, still emitted, rather than 0.0 fills.
     real = pl.DataFrame({
         "target": ["G1", "G1", "G2"], "feature": ["A", "B", "A"],
         "log2_fold_change": [1.0, 1.0, 1.0], "p_adj": [0.001, 0.001, 0.9],
@@ -66,5 +74,4 @@ def test_dispatch_fills_omitted_targets_with_the_worst_value_under_v2():
     rows = dispatch_de_metrics(_NAMES, prep, EvalConfig())
     got = {(r["metric"], r["perturbation"]): r["value"] for r in rows}
     for name in _NAMES:
-        assert got[(name, "G2")] == 0.0
-        assert got[(name, "G1")] == 1.0
+        assert math.isnan(got[(name, "G2")]) and math.isnan(got[(name, "G1")]), name

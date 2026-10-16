@@ -25,9 +25,11 @@ or the streaming path (``scale.py``) instead.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 from collections.abc import Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
@@ -46,9 +48,11 @@ from .io import load_anndata, validate_gene_axis
 from .norm import resolve_target_sum
 from .partition import PARTIAL_SEMANTICS_KEY, result_semantics, write_partial
 from .run import (_close_backed, _effective_input_type, _materialize, _needed_normalizations,
-                  _reject_moments_metrics, _resolve_config, _side_bulks,
-                  dispatch_anndata_metrics, dispatch_de_metrics)
+                  _refuse_cell_metrics_up_front, _reject_cell_metrics, _reject_moments_metrics,
+                  _resolve_config, _side_bulks, dispatch_anndata_metrics, dispatch_de_metrics)
 from .stream import is_shad, shad_fingerprint
+
+logger = logging.getLogger(__name__)
 
 _CONTROL_FORMATS = ("shad", "h5ad")
 _TIDY_SCHEMA = {"perturbation": pl.Utf8, "metric": pl.Utf8, "value": pl.Float64}
@@ -66,11 +70,47 @@ class PertBatchSource(Protocol):
       within-run cache key, not a cross-run guarantee).
     - ``read_control_block()``: in-memory ``AnnData`` of the control rows.
     - ``iter_pert_batches(mem_budget)``: perturbation-complete, budget-sized non-control batches.
+
+    ``pert_universe() -> list[str]`` (OPTIONAL): sorted unique non-control perturbation labels of
+    this source, WITHOUT streaming any batch. Not declared on the Protocol body itself -- doing so
+    would make every source that lacks it (a hand-rolled test double, or a real implementation that
+    predates this method) fail an ``isinstance``/structural check that today only needs the four
+    members above. Callers that need it (a ground-truth cache HIT with no pseudobulk metric
+    selected, so the ordinary stream pass never runs -- see ``_build_reference_streaming_core``)
+    probe for it with ``getattr(source, "pert_universe", None)`` and raise a clear ``TypeError``
+    naming the concrete source type when it is missing. ``cellstream.CellBatchSource`` implements
+    it from its already-resident label array; ``H5adBatchSource``/``RowStoreBatchSource`` do not
+    (unchanged) -- a caller on those paths must select at least one pseudobulk metric to get a
+    universe on a cache hit.
     """
     control: str
     stream_tag: str
     def read_control_block(self) -> "ad.AnnData": ...  # noqa: E704
     def iter_pert_batches(self, mem_budget) -> "Iterator[tuple[list[str], ad.AnnData]]": ...  # noqa: E704
+
+
+@dataclass(frozen=True)
+class RealDEArtifact:
+    """What a ``real_de_provider`` hands back to ``_build_reference_streaming_core``: the path of
+    an immutable real-DE parquet already on disk (a ground-truth cache hit, or a just-published
+    miss), plus JSON-able ``provenance`` recorded verbatim as ``reference.json["real_de_source"]``.
+
+    # RealDEProvider = Callable[..., RealDEArtifact], called as:
+    #   provider(cfg_resolved=cfg, control_ad=control_ad, compute=callable_returning_df)
+    # where `compute` triggers exactly one real-DE stream pass (`_StreamPass.run(with_de=True)`)
+    # and returns its concatenated `pl.DataFrame`.
+
+    A provider exists only while the ground-truth cache is ON (``score_cellstream``). With the
+    cache off there is no provider at all, and the table is computed inline and written exactly
+    as before the cache existed -- so there is no in-memory variant of this artifact.
+    """
+
+    path: str
+    provenance: dict
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError(f"RealDEArtifact needs a non-empty path, got {self.path!r}")
 
 
 def _require_partition_config(cfg: EvalConfig) -> EvalConfig:
@@ -85,9 +125,17 @@ def _require_partition_config(cfg: EvalConfig) -> EvalConfig:
     ``compute_metrics`` (whole-prediction) or the streaming path (``scale.py``) instead.
 
     The returned cfg has the AUC floor normalized so partitioned ``pr_auc``/``roc_auc``
-    stay partition-invariant: ``clip`` and ``replace_zero`` are elementwise (each piece's
-    floor equals the whole-prediction floor) and pass through unchanged; ``min_nonzero``
-    is NOT partition-invariant and is normalized to ``replace_zero@1e-10``.
+    stay partition-invariant: ``preserve``, ``clip`` and ``replace_zero`` are elementwise
+    (each piece's floor equals the whole-prediction floor) and pass through unchanged;
+    ``min_nonzero`` -- the v2 default -- is NOT partition-invariant and is normalized to
+    ``preserve``. On a Float64 table (gpudge's) the two differ only in what an exact-zero
+    pred p-value becomes: the smallest positive p-value over the whole table's scored rows
+    (a missing or NaN prediction counts as 1), or the smallest positive float64. So
+    ``min_nonzero`` ties a zero with that minimum wherever the two share a perturbation (and
+    with any p-value whose -log10 rounds to the same score), while ``preserve`` ranks it above
+    every p-value larger than its floor. Before 0.19.0 the target was ``replace_zero@1e-10``,
+    whose float32 round-trip turns any p below ~7e-46 into 0 and then 1e-10, below a weaker
+    1e-20 (#403).
     """
     if cfg.de.fdr_scope != "per_pert":
         raise NotImplementedError(
@@ -110,13 +158,13 @@ def _require_partition_config(cfg: EvalConfig) -> EvalConfig:
             f"to {resolved!r}. Use compute_metrics (whole-prediction) or the streaming path "
             "(scale.py) instead."
         )
-    # Partition-invariant AUC floor: 'clip' and 'replace_zero' are elementwise (each piece's
-    # floor equals the whole-prediction floor), so they pass through unchanged. 'min_nonzero'
-    # is NOT partition-invariant (each piece sees a different nonzero-p-value set), so it is
-    # normalized to replace_zero@1e-10 -- exactly the pre-SP2 forced behavior (PR #83 review).
+    # Partition-invariant AUC floor: 'preserve', 'clip' and 'replace_zero' are elementwise (each
+    # piece's floor equals the whole-prediction floor), so they pass through unchanged.
+    # 'min_nonzero' is NOT partition-invariant (each piece sees a different nonzero-p-value set),
+    # so it is normalized to 'preserve', a fixed float64 floor -- not to replace_zero@1e-10 (the
+    # pre-0.19.0 target), whose float32 round-trip loses tiny p-values and reverses ranks (#403).
     if cfg.de.auc_pval_floor == "min_nonzero":
-        return replace(cfg, de=replace(cfg.de, auc_pval_floor="replace_zero",
-                                       auc_pval_floor_value=1e-10))
+        return replace(cfg, de=replace(cfg.de, auc_pval_floor="preserve"))
     return cfg
 
 
@@ -508,17 +556,58 @@ def _bundle_comparator(cache_dir, names, comparator, *, cfg: EvalConfig, manifes
     return recorded
 
 
-def _write_reference_bundle(cache_dir, *, cfg, bulks, de_df, control_ad,
+def _write_reference_bundle(cache_dir, *, cfg, bulks, control_ad,
                             real_ref_fingerprint, var_index, universe, control_format,
-                            comparator):
+                            comparator, de_df=None, real_de_source=None,
+                            real_de_provenance=None):
     """Write the real-reference cache bundle (pseudobulk npz per norm, real DE parquet,
-    control cells, reference.json). Shared by build_reference and build_reference_streaming."""
+    control cells, reference.json). Shared by build_reference and build_reference_streaming.
+
+    The real DE table arrives one of two ways, and exactly one must be given:
+
+    * ``de_df``: an in-memory table, written with ``de_df.write_parquet`` -- every caller that
+      passes no ``real_de_provider``, exactly as before the ground-truth cache existed.
+    * ``real_de_source``: a path to an ALREADY-PUBLISHED table (a ground-truth cache hit, or a
+      just-published miss) to link into the bundle rather than rewritten. Linked via
+      ``os.symlink`` first (cheap, and keeps the cache entry as the single copy of the bytes);
+      on ``OSError``/``NotImplementedError`` (e.g. no symlink support on this filesystem) falls
+      back to ``shutil.copy2`` and logs at INFO.
+
+    ``real_de_provenance``, when given, is recorded verbatim as ``reference.json["real_de_source"]``.
+    Without it the manifest has no such key: a bundle built with the cache off is the one every
+    caller wrote before the cache existed.
+    """
+    if (de_df is None) == (real_de_source is None):
+        raise ValueError(
+            "_write_reference_bundle needs exactly one of de_df (an in-memory table to write) "
+            f"or real_de_source (a path to an already-published table to link/copy in); got "
+            f"de_df={('<DataFrame>' if de_df is not None else None)!r} "
+            f"real_de_source={real_de_source!r}"
+        )
     for norm, (perts, means) in bulks.items():
         np.savez(
             os.path.join(cache_dir, f"real_pseudobulk_{norm}.npz"),
             perts=np.asarray(perts, dtype=str), means=np.asarray(means),
         )
-    de_df.write_parquet(os.path.join(cache_dir, "real_de.parquet"))
+    dst = os.path.join(cache_dir, "real_de.parquet")
+    # Never write THROUGH an existing leaf: in a directory reused after a provider-backed build it
+    # is a symlink to a published, immutable cache entry, and shutil.copy2 and write_parquet both
+    # follow a destination symlink.
+    if real_de_source is not None:
+        if os.path.lexists(dst):
+            os.unlink(dst)
+        try:
+            os.symlink(os.path.abspath(real_de_source), dst)
+        except (OSError, NotImplementedError) as e:
+            logger.info(
+                "_write_reference_bundle: symlink %r -> %r failed (%s); copying instead",
+                dst, real_de_source, e,
+            )
+            shutil.copy2(real_de_source, dst)
+    else:
+        if os.path.islink(dst):   # a regular file is overwritten in place, as before
+            os.unlink(dst)
+        de_df.write_parquet(dst)
     if control_format == "h5ad":
         control_ad.write_h5ad(os.path.join(cache_dir, "real_control.h5ad"))
     else:  # "shad"
@@ -560,6 +649,11 @@ def _write_reference_bundle(cache_dir, *, cfg, bulks, de_df, control_ad,
         # footings. See BUNDLE_SEMANTIC_FIELDS for why each one is in, and which are out.
         BUNDLE_SEMANTICS_KEY: _bundle_semantics(cfg),
     }
+    if real_de_provenance is not None:
+        # Ground-truth DE cache provenance: which committed entry real_de.parquet links to.
+        # Recorded only when a provider supplied the table (the cache is on); a bundle built
+        # without one keeps the manifest it always had.
+        manifest["real_de_source"] = real_de_provenance
     with open(os.path.join(cache_dir, "reference.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
     return manifest
@@ -584,6 +678,7 @@ def build_reference(real, *, config, cache_dir, control_format="shad",
     if control_format not in _CONTROL_FORMATS:
         raise ValueError(f"control_format must be one of {_CONTROL_FORMATS}, got {control_format!r}")
     cfg = _require_partition_config(_resolve_config(config, {}))
+    cfg = _refuse_cell_metrics_up_front(cfg, driver="build_reference (partitioned in-memory)")
     os.makedirs(cache_dir, exist_ok=True)
 
     real_is_shad = isinstance(real, (str, os.PathLike)) and is_shad(real)
@@ -668,7 +763,7 @@ def build_reference_streaming(real_h5ad, *, config, cache_dir, control, mem_budg
 
 def _build_reference_streaming_core(source: PertBatchSource, *, config, cache_dir, mem_budget,
                                     input_type=None, native_gpu_normalize=False,
-                                    comparator=None) -> dict:
+                                    comparator=None, real_de_provider=None) -> dict:
     """Out-of-core real reference for one context from a ``PertBatchSource``. Streams
     perturbation-complete batches (never materializing the whole real matrix), computing
     per-batch pseudobulk + per-batch DE (vs the resident control), concatenated into the same
@@ -679,7 +774,39 @@ def _build_reference_streaming_core(source: PertBatchSource, *, config, cache_di
     real matrix -- cheap because it never materializes here. Safe because each context gets its
     own freshly-built bundle in a fresh temp dir (``score_h5ad_manifest`` /
     ``rowstore.score_rowstore`` create ``ref_dir``/``parts_dir`` per context) read only by
-    that context's ``score_piece`` calls, so there is no cross-context cache reuse to guard."""
+    that context's ``score_piece`` calls, so there is no cross-context cache reuse to guard.
+
+    ``real_de_provider`` (opt-in, the ground-truth DEG cache -- ``cellstream.score_cellstream``):
+    a ``RealDEProvider`` callable that decides where the real DE table comes from, instead of it
+    always being computed inline. The build runs in five stages:
+
+    * **S1** (unchanged): resolve the control block, the effective input type + target sum, the
+      metric selection, comparator and needed normalizations, then validate + pseudobulk the
+      control.
+    * **S2/S3**: a private ``_StreamPass`` owns the one-shot walk of
+      ``source.iter_pert_batches`` that accumulates this context's perturbation universe and
+      (per batch) the real-side pseudobulk into ``acc`` -- and, when asked, that batch's real DE
+      frame via ``compute_de``, with EXACTLY the same kwargs this function always passed it.
+    * **S4**: with ``real_de_provider=None`` (every h5ad-manifest/rowstore caller, and every
+      existing test), the pass runs once with DE on -- byte-identical to before. With a provider,
+      it is handed ``compute=stream_pass.run(with_de=True)`` and decides whether to call it (a
+      cache MISS) or not (a HIT). On a HIT the pass never ran, so this stage repairs what
+      only it would have populated: if any pseudobulk normalization is needed, one pass runs
+      with ``with_de=False`` (real DE is already on disk, courtesy of the cache); if not, the
+      universe is read from ``source.pert_universe()`` instead, since nothing else needs a batch
+      to be materialized at all.
+    * **S5** (unchanged shape): finalize the pseudobulk arrays, compute the real-reference
+      fingerprint from the (already-resident) control block, and write the bundle -- as a
+      freshly-written table when there is a ``de_df``, or linked in from ``real_de_source`` when
+      the provider already put it on disk.
+
+    Skipping ``_validate_stream_slice`` on a skipped batch (the HIT-with-no-norms branch) is
+    sound: those checks guard data that is about to feed a computation, and on a HIT no real-side
+    computation over that batch happens here at all -- the ground-truth cache's semantic key
+    already binds ``validate_input``/``max_counts_per_cell`` (via ``build_real_de_semantics``) to
+    the run that DID compute and publish the cached table, and the control block (which every
+    branch still reads) is validated exactly as before in every case.
+    """
     from dataclasses import replace as _replace
 
     from .cache import fingerprint_adata
@@ -688,6 +815,7 @@ def _build_reference_streaming_core(source: PertBatchSource, *, config, cache_di
                       _side_bulks, _val_allow_fractional, _validate_input_once)
 
     cfg = _require_partition_config(_resolve_config(config, {}))
+    cfg = _refuse_cell_metrics_up_front(cfg, driver="build_reference_streaming (partitioned in-memory)")
     cfg = _replace(cfg, control=source.control)     # per-context control from the source
     if input_type is not None:
         cfg = _replace(cfg, input_type=input_type)
@@ -738,24 +866,72 @@ def _build_reference_streaming_core(source: PertBatchSource, *, config, cache_di
         acc[n]["perts"].append(np.asarray(cp, dtype=str))
         acc[n]["means"].append(np.asarray(cm))
 
-    de_frames = []
-    universe = []
-    for batch_perts, batch_ad in source.iter_pert_batches(mem_budget):
-        universe += list(batch_perts)
-        _validate_stream_slice(batch_ad)
-        b_bulks = _side_bulks(batch_ad, fp=None, store=None, norms=norms, cfg=cfg, side="real",
-                              effective_input_type=_eff)
-        for n in norms:
-            bp, bm = b_bulks[n]
-            acc[n]["perts"].append(np.asarray(bp, dtype=str))
-            acc[n]["means"].append(np.asarray(bm))
-        de_frames.append(compute_de(
-            batch_ad, backend=cfg.de.backend, groupby=cfg.pert_col, reference=control_ad,
-            control_group=cfg.control, mean_calc=cfg.de.mean_calc, epsilon=cfg.de.epsilon,
-            input_type=cfg.input_type, target_sum=cfg.target_sum, clip_value=cfg.de.clip_value,
-            fdr_scope=cfg.de.fdr_scope, filter_gene_min_cpm_cell=cfg.filter.filter_gene_min_cpm_cell,
-            threads=cfg.num_threads, native_gpu_normalize=native_gpu_normalize,
-        ))
+    class _StreamPass:
+        """One walk of ``source.iter_pert_batches``, run at most once. Always accumulates this
+        context's perturbation universe and (per batch) the real-side pseudobulk into ``acc``;
+        additionally computes this batch's real DE frame when ``with_de=True``."""
+
+        def __init__(self):
+            self.universe: list[str] = []
+            self.de_frames: list = []
+            self.ran = False
+
+        def run(self, *, with_de: bool):
+            if self.ran:
+                raise RuntimeError("real-DE stream pass may run only once")
+            self.ran = True
+            for batch_perts, batch_ad in source.iter_pert_batches(mem_budget):
+                self.universe += list(batch_perts)
+                _validate_stream_slice(batch_ad)
+                b_bulks = _side_bulks(batch_ad, fp=None, store=None, norms=norms, cfg=cfg,
+                                      side="real", effective_input_type=_eff)
+                for n in norms:
+                    bp, bm = b_bulks[n]
+                    acc[n]["perts"].append(np.asarray(bp, dtype=str))
+                    acc[n]["means"].append(np.asarray(bm))
+                if with_de:
+                    self.de_frames.append(compute_de(
+                        batch_ad, backend=cfg.de.backend, groupby=cfg.pert_col,
+                        reference=control_ad, control_group=cfg.control,
+                        mean_calc=cfg.de.mean_calc, epsilon=cfg.de.epsilon,
+                        input_type=cfg.input_type, target_sum=cfg.target_sum,
+                        clip_value=cfg.de.clip_value, fdr_scope=cfg.de.fdr_scope,
+                        filter_gene_min_cpm_cell=cfg.filter.filter_gene_min_cpm_cell,
+                        threads=cfg.num_threads, native_gpu_normalize=native_gpu_normalize,
+                    ))
+            return pl.concat(self.de_frames, how="vertical") if with_de else None
+
+    sp = _StreamPass()
+    artifact = None
+    if real_de_provider is None:
+        de_df = sp.run(with_de=True)
+    else:
+        de_df = None   # the provider's table is already on disk (artifact.path)
+        artifact = real_de_provider(cfg_resolved=cfg, control_ad=control_ad,
+                                    compute=lambda: sp.run(with_de=True))
+        if not sp.ran:
+            # HIT: the provider never called compute(), so nothing above has populated `acc` or
+            # a universe. Repair only what THIS run's metric selection actually needs.
+            if norms:
+                sp.run(with_de=False)
+            else:
+                universe_fn = getattr(source, "pert_universe", None)
+                if universe_fn is None:
+                    raise TypeError(
+                        f"{type(source).__name__} has no pert_universe() method, but this "
+                        "ground-truth cache HIT needs the perturbation universe without "
+                        "streaming a single batch (no pseudobulk metric is selected, so the "
+                        "ordinary stream pass that would otherwise supply it never runs). "
+                        "Implement PertBatchSource.pert_universe() on this source, or select "
+                        "at least one pseudobulk-consuming metric."
+                    )
+                found = sorted(universe_fn())
+                if not found:
+                    raise ValueError(
+                        f"{type(source).__name__}.pert_universe() returned no perturbations; "
+                        "a ground-truth cache hit needs a non-empty universe"
+                    )
+                sp.universe = found
 
     bulks = {}
     for n in norms:
@@ -763,15 +939,18 @@ def _build_reference_streaming_core(source: PertBatchSource, *, config, cache_di
         means = np.vstack(acc[n]["means"])
         order = np.argsort(perts, kind="stable")
         bulks[n] = (perts[order], means[order])
-    de_df = pl.concat(de_frames, how="vertical")
 
     real_ref_fingerprint = fingerprint_adata(control_ad, pert_col=cfg.pert_col,
                                              strict=cfg.cache_strict) + f"|stream:{source.stream_tag}"
     var_index = np.asarray(control_ad.var.index.values, dtype=str).tolist()
     return _write_reference_bundle(
-        cache_dir, cfg=cfg, bulks=bulks, de_df=de_df, control_ad=control_ad,
+        cache_dir, cfg=cfg, bulks=bulks, control_ad=control_ad,
         real_ref_fingerprint=real_ref_fingerprint, var_index=var_index,
-        universe=sorted(universe), control_format="h5ad", comparator=comparator)
+        universe=sorted(sp.universe), control_format="h5ad", comparator=comparator,
+        de_df=de_df,
+        real_de_source=(artifact.path if artifact is not None else None),
+        real_de_provenance=(artifact.provenance if artifact is not None else None),
+    )
 
 
 def build_pred_control_reference(pred_h5ad, *, config, cache_dir, control,
@@ -805,6 +984,7 @@ def _build_pred_control_reference_core(source: PertBatchSource, *, config, cache
                       _side_bulks, _val_allow_fractional, _validate_input_once)
 
     cfg = _require_partition_config(_resolve_config(config, {}))
+    cfg = _refuse_cell_metrics_up_front(cfg, driver="build_pred_control_reference (partitioned in-memory)")
     cfg = _replace(cfg, control=source.control)     # per-context control from the source
     if input_type is not None:
         cfg = _replace(cfg, input_type=input_type)
@@ -1025,9 +1205,13 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
 
     ``de_out`` (opt-in, #387): when set, also write this piece's raw pred DE table
     (the ``compute_de`` output, pre-rank/threshold) as ``{piece_id}__de_pred.parquet``
-    into that directory, so a per-piece driver (``score_cellstream``) can concatenate
-    them into the full ``de_pred.parquet`` the ``--write-degenes`` artifact emits.
-    Requires ``piece_id`` and a DE metric in the selection; otherwise a no-op.
+    into that directory (created if missing), so a per-piece driver (``score_cellstream``)
+    can concatenate them into the full ``de_pred.parquet``. ``piece_id`` defaults exactly as
+    for ``partial_out``. A no-op when the selection has no DE metric.
+
+    Whenever either sink is set, ``piece_id`` is resolved and checked up front, before any
+    work: it must be a bare file name (no directory part, not ``.``/``..``), because both
+    sinks name files after it.
 
     ``bundle``: a ``_RefBundle`` for ``cache_dir``, so a driver scoring many pieces against one
     reference reads each cached artifact once instead of once per piece (#153). Omitted -> one is
@@ -1042,7 +1226,28 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
 
     from .run import _effective_input_type
 
+    # Both sinks name files after piece_id, so resolve and check it ONCE, before any work: the
+    # file-stem default must apply to de_out as well as partial_out, and an id with a directory
+    # part must be refused before it can place a file outside the sink (write_partial's rule).
+    if de_out is not None or partial_out:
+        if piece_id is None:
+            if isinstance(pred_piece, (str, os.PathLike)):
+                piece_id = os.path.splitext(os.path.basename(str(pred_piece)))[0]
+            else:
+                raise ValueError(
+                    "score_piece needs an explicit piece_id for in-memory pred pieces"
+                )
+        if piece_id != os.path.basename(piece_id) or piece_id in ("", ".", ".."):
+            raise ValueError(f"piece_id must be a bare name, got {piece_id!r}")
+        if de_out is not None:
+            os.makedirs(de_out, exist_ok=True)
+
     cfg = _require_partition_config(_resolve_config(config, {}))
+    # Resolved ONCE, here (an iterator selection would be exhausted by a second resolution),
+    # and refused before the bundle or the piece is read: a refused selection must not pay
+    # for either.
+    names, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
+    _reject_cell_metrics(names, driver="score_piece (partitioned in-memory)")
     if bundle is None:
         bundle = _RefBundle(cache_dir, cfg)
     else:
@@ -1057,7 +1262,6 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
                 "and is verified against the bundle manifest instead -- #185.)"
             )
     manifest = bundle.manifest
-    names, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
     comparator = _bundle_comparator(
         cache_dir, names, comparator, cfg=cfg, manifest=manifest, caller="score_piece",
     )
@@ -1187,9 +1391,7 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
             # matching what compute_metrics writes under --write-degenes. The piece's cells are
             # its own perturbations, so this frame's targets are already this piece's -- the
             # concatenation over pieces in score_cellstream reconstructs the full de_pred (#387).
-            if de_out is not None:
-                if piece_id is None:
-                    raise ValueError("score_piece needs an explicit piece_id to write de_out")
+            if de_out is not None:   # piece_id resolved and checked at the top
                 pred_de.write_parquet(os.path.join(de_out, f"{piece_id}__de_pred.parquet"))
             real_de = real_de.filter(pl.col("target").is_in(piece_perts))
             pred_de = pred_de.filter(pl.col("target").is_in(piece_perts))
@@ -1210,14 +1412,7 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
         df = pl.DataFrame(rows, schema=_TIDY_SCHEMA).filter(
             pl.col("perturbation").is_in(piece_perts)
         )
-        if partial_out:
-            if piece_id is None:
-                if isinstance(pred_piece, (str, os.PathLike)):
-                    piece_id = os.path.splitext(os.path.basename(str(pred_piece)))[0]
-                else:
-                    raise ValueError(
-                        "score_piece needs an explicit piece_id for in-memory pred pieces"
-                    )
+        if partial_out:   # piece_id resolved and checked at the top
             write_partial(df, partial_out, subset_id=piece_id, meta={
                 "real_ref_fingerprint": manifest["real_ref_fingerprint"],
                 "config_hash": config_hash(cfg.to_dict()),

@@ -26,6 +26,7 @@ import os
 import polars as pl
 
 from .catalog import CATALOG
+from .real_gate import count_corr_decision, prediction_counts_constant
 from .run import aggregate_metrics
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,9 @@ def select_subset(perts, *, subset=None, fraction=None, index=None):
 #: 4 = `reach_purity_floor` added -- `de_direction_reach`'s raw form moved from the derived
 #:     `1 - alpha/2` to the calibrated `direction.REACH_PURITY_FLOOR`. Not a counter: the value
 #:     itself, so a future retune moves the payload with no bump to remember.
-_PARTIAL_SEMANTICS_SCHEMA = 5      # 2->3 #172, 3->4 the purity floor, 4->5 #271
+#: 6 = `metric_real_gate` and `real_gate_semantics` added (#391).
+#: 7 = `no_target_gene_semantics` added (#397).
+_PARTIAL_SEMANTICS_SCHEMA = 7      # 2->3 #172, 3->4 the purity floor, 4->5 #271, 5->6 #391, 6->7 #397
 
 #: The sidecar key. Named for what it is rather than for the digest, because `aggregate_partials`
 #: reports the differing PAYLOADS on a mismatch -- a bare hash would say only "these disagree".
@@ -160,7 +163,7 @@ def result_semantics(names, *, comparator: str) -> dict:
     the half that survived.
 
     Modelled on ``baseline._baseline_policy_dict``, which #231 gave an ordered ``metric_agg``
-    term for the same reason, plus the two semantics counters ``run._result_config_digest``
+    term for the same reason, plus the semantics counters ``run._result_config_digest``
     already keys the result cache on:
 
     * ``metric_agg`` -- which statistic reduces each metric. Ordered pairs, not a dict, so
@@ -171,12 +174,14 @@ def result_semantics(names, *, comparator: str) -> dict:
       token alone does not identify it: #264 PR1 stamped ``comparator="bulk_lognorm"`` while six
       ``expr_*`` entries still declared ``lognorm``, so two runs agreed on the comparator while
       computing different numbers.
-    * ``de_rank_semantics`` / ``pds_exclusion_semantics`` / ``ontarget_exclusion_semantics`` --
-      the repo's "the meaning of this family changed" counters (#248 is why the second exists,
-      #172 the third). Included UNCONDITIONALLY here, unlike in the result cache where they are
-      scoped so nothing that could not have been affected loses a warm entry. A partial is a
-      transient scale-run intermediate, so there is no warm-cache cost to pay for the simpler,
-      stricter rule.
+    * ``de_rank_semantics`` / ``pds_exclusion_semantics`` / ``ontarget_exclusion_semantics`` /
+      ``no_target_gene_semantics`` -- the repo's "the meaning of this family changed" counters
+      (#248 is why the second exists, #172 the third, #397 the fourth). Included UNCONDITIONALLY
+      here, unlike in the result cache where they are scoped so nothing that could not have been
+      affected loses a warm entry. A partial is a transient scale-run intermediate, so there is no
+      warm-cache cost to pay for the simpler, stricter rule -- though it does mean each bump (and
+      the schema bump with it) makes every partial written before it incomparable with one
+      written after, map-less and gene-panel runs included.
     * ``reach_purity_floor`` -- the same idea for `de_direction_reach`'s raw form, but carried
       as the VALUE rather than a counter, since here the semantics are a single number.
 
@@ -185,8 +190,9 @@ def result_semantics(names, *, comparator: str) -> dict:
     from .catalog import CATALOG, _NAME_TO_CANONICAL, derived_policy
     from .metrics.direction import REACH_PURITY_FLOOR
     from .run import (_DE_RESULT_SEMANTICS, _GROUPED_SUM_REDUCTION_SEMANTICS,
-                      _ONTARGET_EXCLUSION_SEMANTICS, _PDS_EXCLUSION_SEMANTICS,
-                      effective_normalization, metric_agg)
+                      _NO_TARGET_GENE_SEMANTICS, _ONTARGET_EXCLUSION_SEMANTICS,
+                      _PDS_EXCLUSION_SEMANTICS, _REAL_GATE_SEMANTICS, effective_normalization,
+                      metric_agg)
 
     ordered = sorted(set(names))
     specs = {n: CATALOG.get(_NAME_TO_CANONICAL.get(n, n)) for n in ordered}
@@ -199,6 +205,11 @@ def result_semantics(names, *, comparator: str) -> dict:
         # reduction. Missing from the first version of this payload -- codex-review.
         "metric_worst_value": [[n, (specs[n].worst_value if specs[n] is not None else None)]
                               for n in ordered],
+        # #391: the reference-only gate decides which rows are NaN before the fill runs, so it
+        # moves emitted values exactly as `worst_value` does. By value, beside it.
+        "metric_real_gate": [[n, (specs[n].real_gate.payload()
+                                  if specs[n] is not None and specs[n].real_gate is not None
+                                  else None)] for n in ordered],
         # `kind` routes a metric to the anndata or DE dispatch; `needs_moments` selects a DIFFERENT
         # cache artifact (pseudobulk_moments_* vs pseudobulk_*) and a different computation. Both
         # move what was computed while leaving agg/normalization/worst_value untouched
@@ -228,6 +239,14 @@ def result_semantics(names, *, comparator: str) -> dict:
         # whose bulks were rounded differently under one metric name. `comparator` in this payload
         # cannot see it: that records which comparator was asked for, not what its group sum means.
         "grouped_sum_reduction_semantics": _GROUPED_SUM_REDUCTION_SEMANTICS,
+        # #391: what the gated v2 fill DOES, which no catalog field can see. Unconditional like
+        # its siblings above.
+        "real_gate_semantics": _REAL_GATE_SEMANTICS,
+        # #397: what a `None` value in `target_gene_map`, and its "*" key, mean. Unconditional like
+        # its siblings above, though the result cache scopes it to maps that hold a `None`: every
+        # partial records the same `config_hash` across the change, so a directory straddling it
+        # would reduce a "*"-keyed map read two ways under one metric name.
+        "no_target_gene_semantics": _NO_TARGET_GENE_SEMANTICS,
     }
 
 
@@ -348,21 +367,38 @@ def _inject_nsig_spearman(full, *, metric_name,
             f"{pred_metric!r} rows absent from partials; cannot reconstruct {metric_name}")
     merged = real.join(pred, on="perturbation", how="left").with_columns(
         pl.col("n_pred").fill_null(0.0)).filter(pl.col("n_real") > 0)
-    if merged.height == 0:
-        value = 1.0
+    _spec = CATALOG.get(metric_name)
+    gate = _spec.real_gate if _spec is not None else None
+    # #391, through the SAME two helpers the whole-prediction dispatch uses (`real_gate`), so the
+    # partitioned/streamed value cannot drift from `compute_metrics`'. Under v1 `metric_name` is
+    # the v1 alias (`h5ad_manifest._nsig_names`), which is not a CATALOG key, so `_spec` is None
+    # and the old branch runs unchanged -- no gate and no fill, as v1 parity requires
+    # (`test_inject_nsig_spearman_v1_names`).
+    reason = (None if gate is None
+              else count_corr_decision(merged["n_real"].to_list(), gate=gate))
+    if reason is not None:
+        logger.warning(
+            "%s: not scored for any of %d perturbation(s) -- %s. The gate reads the reference "
+            "alone, so this is the same for every submission (issue #391).",
+            metric_name, full["perturbation"].n_unique(), reason,
+        )
+        value = float("nan")
+    elif gate is not None and prediction_counts_constant(merged["n_pred"].to_list()):
+        value = float(_spec.worst_value)
     else:
-        corr = merged.select(
-            pl.corr(pl.col("n_real"), pl.col("n_pred"), method="spearman")
-        ).to_numpy().ravel()[0]
-        value = float(corr) if corr is not None and corr == corr else float("nan")
-    # Match compute_metrics' v2 no-droppable-NaN policy (run._fill_no_drop): an undefined
-    # Spearman (NaN -- e.g. fewer than 2 targets with a real-significant gene) is filled with the
-    # metric's catalog worst_value, so partitioned/streamed output equals whole-prediction
-    # scoring. The partition path is v2-only, where that fill always applies.
-    if value != value:  # NaN
-        _spec = CATALOG.get(metric_name)
-        if _spec is not None and _spec.worst_value is not None:
-            value = float(_spec.worst_value)
+        if merged.height == 0:
+            value = 1.0
+        else:
+            corr = merged.select(
+                pl.corr(pl.col("n_real"), pl.col("n_pred"), method="spearman")
+            ).to_numpy().ravel()[0]
+            value = float(corr) if corr is not None and corr == corr else float("nan")
+        # Match compute_metrics' v2 no-droppable-NaN policy (run._fill_no_drop): an undefined
+        # Spearman inside the gate is filled with the metric's catalog worst_value, so
+        # partitioned/streamed output equals whole-prediction scoring.
+        if value != value:  # NaN
+            if _spec is not None and _spec.worst_value is not None:
+                value = float(_spec.worst_value)
     all_perts = full["perturbation"].unique().to_list()
     add = pl.DataFrame(
         {"perturbation": all_perts, "metric": [metric_name] * len(all_perts),
