@@ -107,8 +107,25 @@ class MetricSpec:
     # gate the row is NaN and it leaves the aggregate. Read by `run.dispatch_*_metrics` and
     # `partition._inject_nsig_spearman`. See `real_gate.RealGate` for the ten kinds.
     real_gate: RealGate | None = None
+    # #412, design §5.1–5.2: version identifies the metric and bumps under the §5.2 rule;
+    # tolerance is the class the release drift check compares it under. None lets ad-hoc
+    # specs (tests' _spec helpers) omit it; every catalog entry sets it explicitly, and
+    # tests/test_metric_versions.py enforces the class.
+    version: int = 1
+    tolerance: Literal["exact", "continuous"] | None = None
 
     def __post_init__(self) -> None:
+        # #412, design §5.1–5.2: refuse invalid identity fields before they can be published.
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+            raise ValueError(
+                f"metric {self.name!r}: version must be an int (not bool) >= 1; "
+                f"got {self.version!r}"
+            )
+        if self.tolerance not in (None, "exact", "continuous"):
+            raise ValueError(
+                f"metric {self.name!r}: tolerance must be None, 'exact' or 'continuous'; "
+                f"got {self.tolerance!r}"
+            )
         # Truthiness, not `is not None`: `_build_name_index` skips "" as an invalid spelling,
         # so an empty v1_name is no more emittable than a missing one and must not derive
         # availability from it.
@@ -269,21 +286,28 @@ def _disc(distance: str) -> Callable:
     return functools.partial(discrimination_score, distance=distance)
 
 
+# #412, design §5.5: bump when a metric is added, removed, or bumps its version.
+METRICS_VERSION: int = 1
+
+
 CATALOG: dict[str, MetricSpec] = {
     "expr_mae": MetricSpec(
         name="expr_mae", v1_name="mae", func=mae, scoring=ERROR, agg="mean",
         profiles=("full", "minimal", "vcc", "anndata"), kind="anndata",
         normalization="expr_comparator",
+        tolerance="continuous",
     ),
     "pds_l1": MetricSpec(
         name="pds_l1", v1_name="discrimination_score_l1", func=_disc("l1"), scoring=BOUNDED,
         agg="mean",
         profiles=("full", "minimal", "vcc", "anndata", "pds"), kind="anndata", normalization="expr_comparator",
+        tolerance="exact",
     ),
     "pds_l2": MetricSpec(
         name="pds_l2", v1_name="discrimination_score_l2", func=_disc("l2"), scoring=BOUNDED,
         agg="mean",
         profiles=("full", "anndata"), kind="anndata", normalization="expr_comparator",
+        tolerance="exact",
     ),
     # `BOUNDED_UNFLOORED`, not `BOUNDED`: one of the four bounded `vcc2026` members whose
     # clip-at-0 was removed. Its comparator sits at the metric's chance point (a uniform rank
@@ -296,6 +320,7 @@ CATALOG: dict[str, MetricSpec] = {
         name="pds_cosine", v1_name="discrimination_score_cosine", func=_disc("cosine"),
         scoring=BOUNDED_UNFLOORED, agg="mean",
         profiles=("full", "anndata", "vcc2026"), kind="anndata", normalization="expr_comparator",
+        tolerance="exact",
     ),
     "delta_pearson": MetricSpec(
         name="delta_pearson", v1_name="pearson_delta", func=pearson_delta, scoring=BOUNDED,
@@ -305,11 +330,13 @@ CATALOG: dict[str, MetricSpec] = {
         # so it is not scored; a constant PREDICTED delta is still charged -1.0. No floor: its
         # points are every measured gene. The near-constant prediction is out of scope (spec §8).
         worst_value=-1.0, real_gate=RealGate("delta_var", min_gate_size=None),
+        tolerance="continuous",
     ),
     "expr_mse": MetricSpec(
         name="expr_mse", v1_name="mse", func=mse, scoring=ERROR, agg="mean",
         profiles=("full", "minimal", "anndata"), kind="anndata",
         normalization="expr_comparator",
+        tolerance="continuous",
     ),
     # The three-column split (issue #257). `expr_mse_unbiased_norm` declared a no-skill point
     # of 1.0 that it did not have: its numerator was debiased on both sides while its
@@ -330,21 +357,25 @@ CATALOG: dict[str, MetricSpec] = {
         profiles=("full", "anndata", "vcc2026"), kind="anndata",
         normalization="expr_comparator",
         worst_value=None, needs_moments=True,
+        tolerance="continuous",
     ),
     "expr_mse_unbiased_capped": MetricSpec(
         name="expr_mse_unbiased_capped", v1_name=None, func=mse_unbiased_capped, agg="mean",
         scoring=DIAG, profiles=("full", "anndata", "vcc2026"), kind="anndata",
         normalization="expr_comparator", worst_value=None, needs_moments=True,
+        tolerance="continuous",
     ),
     "expr_distance_unbiased": MetricSpec(
         name="expr_distance_unbiased", v1_name=None, func=distance_unbiased, agg="mean",
         scoring=DIAG, profiles=("full", "anndata", "vcc2026"), kind="anndata",
         normalization="expr_comparator", worst_value=None, needs_moments=True,
+        tolerance="continuous",
     ),
     "expr_real_mass_ratio": MetricSpec(
         name="expr_real_mass_ratio", v1_name=None, func=real_mass_ratio, agg="mean",
         scoring=DIAG, profiles=("full", "anndata", "vcc2026"), kind="anndata",
         normalization="expr_comparator", worst_value=None,
+        tolerance="continuous",
     ),
     # The scored metric. It has NO per-perturbation column: `Σ num / Σ den` is not the mean of
     # anything, and a column whose rows do not average to its own aggregate is a trap (#233).
@@ -386,6 +417,7 @@ CATALOG: dict[str, MetricSpec] = {
         profiles=("full", "anndata", "vcc2026"), kind="anndata",
         normalization="expr_comparator",
         worst_value=None,
+        tolerance="continuous",
     ),
     # ⚠️ These two are ALIASES of `expr_mse`/`expr_mae` under the v2 default
     # `control_source="real"` (issue #189) -- the same quantity per perturbation, because the
@@ -404,10 +436,12 @@ CATALOG: dict[str, MetricSpec] = {
     "delta_mse": MetricSpec(
         name="delta_mse", v1_name="mse_delta", func=mse_delta, scoring=ERROR, agg="mean",
         profiles=("full", "anndata"), kind="anndata", normalization="expr_comparator",
+        tolerance="continuous",
     ),
     "delta_mae": MetricSpec(
         name="delta_mae", v1_name="mae_delta", func=mae_delta, scoring=ERROR, agg="mean",
         profiles=("full", "anndata"), kind="anndata", normalization="expr_comparator",
+        tolerance="continuous",
     ),
 }
 
@@ -427,7 +461,8 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
     are v2-native (``v1_name=None``) even in the wilcoxon family."""
     pre = f"de_{method}_"
 
-    def add(suffix, *, v1, func, scoring, profiles, agg, worst=None, v1_avail=True, gate=None):
+    def add(suffix, *, v1, func, scoring, profiles, agg, tolerance, version=1,
+            worst=None, v1_avail=True, gate=None):
         name = pre + suffix
         catalog[name] = MetricSpec(
             name=name, func=func, scoring=scoring, agg=agg,
@@ -440,6 +475,7 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
             # v1-available: nobody passed the flag. `v1_avail=False` stays honoured, but it
             # is now redundant wherever v1 is already None.
             v1_available=(None if v1_avail else False),
+            version=version, tolerance=tolerance,
         )
 
     for metric in ("overlap", "precision"):
@@ -451,7 +487,7 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
             else:
                 profiles = ("full", "de")
             add(suffix, v1=v1, func=_de_overlap(k, metric), scoring=BOUNDED, agg="mean",
-                profiles=profiles)
+                profiles=profiles, tolerance="exact")
 
     # Every directional metric here is SCORED; only the two nsig counts are not, because
     # they alone have no direction (neither more nor fewer significant genes is better).
@@ -485,36 +521,38 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
 
     add("nsig_counts_real", v1="de_nsig_counts_real",
         func=functools.partial(de_nsig_counts, side="real"), scoring=_NO_DIRECTION, agg="mean",
-        profiles=("full", "minimal", "de"))
+        profiles=("full", "minimal", "de"), tolerance="exact")
     add("nsig_counts_pred", v1="de_nsig_counts_pred",
         func=functools.partial(de_nsig_counts, side="pred"), scoring=_NO_DIRECTION, agg="mean",
-        profiles=("full", "minimal", "de"))
+        profiles=("full", "minimal", "de"), tolerance="exact")
     # #391 -- the gates. A perturbation the REFERENCE cannot score is NaN and leaves the
     # aggregate; inside the gate, `worst` is what a prediction-side failure is charged. Where
     # `worst` is None the metric has no prediction-side undefined case at all (spec §5.3), and
     # the dispatch raises if one ever appears. Every DE gate floors at `DEFAULT_MIN_GATE_SIZE`.
     add("nsig_spearman", v1="de_spearman_sig", func=de_nsig_spearman, scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"), worst=-1.0, gate=RealGate("count_corr"))
+        agg="mean", profiles=("full", "de"), worst=-1.0, gate=RealGate("count_corr"),
+        tolerance="exact")
     add("sig_recall", v1="de_sig_genes_recall", func=de_sig_recall, scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"), gate=RealGate("sig_set"))
+        agg="mean", profiles=("full", "de"), gate=RealGate("sig_set"), tolerance="exact")
     add("direction_match", v1="de_direction_match", func=de_direction_match, scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"), worst=0.0, gate=RealGate("sig_lfc"))
+        agg="mean", profiles=("full", "de"), worst=0.0, gate=RealGate("sig_lfc"), tolerance="exact")
     # Prediction-conditioned, so a prediction that calls nothing is still charged 0.0 -- but a
     # reference with no non-null log2FC leaves nothing to compare against, and that is not the
     # prediction's doing (codex, checkpoint 1). The floor never binds on a real panel.
     add("model_direction_match", v1="de_model_direction_match",
         func=de_model_direction_match, scoring=BOUNDED, agg="mean",
-        profiles=("full", "de"), worst=0.0, gate=RealGate("lfc_present"))
+        profiles=("full", "de"), worst=0.0, gate=RealGate("lfc_present"), tolerance="exact")
     add("lfc_spearman", v1="de_spearman_lfc_sig", func=de_lfc_spearman, scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"), worst=-1.0, gate=RealGate("rank_corr"))
+        agg="mean", profiles=("full", "de"), worst=-1.0, gate=RealGate("rank_corr"),
+        tolerance="exact")
     add("lfc_spearman_pos", v1="de_spearman_pos_lfc_sig",
         func=functools.partial(de_lfc_spearman, lfc_direction="pos"), scoring=BOUNDED,
         agg="mean", profiles=("full", "de"), worst=-1.0,
-        gate=RealGate("rank_corr", lfc_direction="pos"))
+        gate=RealGate("rank_corr", lfc_direction="pos"), tolerance="exact")
     add("lfc_spearman_neg", v1="de_spearman_neg_lfc_sig",
         func=functools.partial(de_lfc_spearman, lfc_direction="neg"), scoring=BOUNDED,
         agg="mean", profiles=("full", "de"), worst=-1.0,
-        gate=RealGate("rank_corr", lfc_direction="neg"))
+        gate=RealGate("rank_corr", lfc_direction="neg"), tolerance="exact")
     # Issue #208. The de_* block's only NUMBER-SCALE member: the rank members say whether
     # the ordering is right, this says whether a two-fold change is reported as two-fold.
     # `ERROR_LINEAR`, not `ERROR`: same direction, same anchor, same -6.0 floor, but the
@@ -549,11 +587,11 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
     # in `vcc2026`, whose members are decisive as of #255: a degenerate baseline is a hard
     # failure rather than a silent change to the competition average's denominator.
     add("lfc_nmae", v1=None, func=de_lfc_nmae, scoring=ERROR_LINEAR, agg="mean",
-        profiles=("full", "de", "vcc2026"))
+        profiles=("full", "de", "vcc2026"), tolerance="continuous")
     add("pr_auc", v1="pr_auc", func=de_pr_auc, scoring=BOUNDED, agg="mean",
-        profiles=("full", "de"), gate=RealGate("two_class"))
+        profiles=("full", "de"), gate=RealGate("two_class"), tolerance="continuous")
     add("roc_auc", v1="roc_auc", func=de_roc_auc, scoring=BOUNDED, agg="mean",
-        profiles=("full", "de"), gate=RealGate("two_class"))
+        profiles=("full", "de"), gate=RealGate("two_class"), tolerance="continuous")
     # Chance-corrected agreement metrics (issue #14): correlation-family measures over a
     # per-perturbation 2x2 table, bounded [-1, 1] (0 = chance, 1 = perfect, -1 = worst).
     # full/de only (so the vcc competition score is unchanged) and v2-native (no cell-eval
@@ -562,16 +600,16 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
     # significant); the prediction-side -1 (it calls nothing, or everything) stays.
     # `precision_adjusted` (markedness) has no reference-side 0/0, so it stays ungated.
     add("overlap_adjusted", v1=None, func=de_overlap_adjusted, scoring=BOUNDED, agg="mean",
-        profiles=("full", "de"), gate=RealGate("ranked_universe"))
+        profiles=("full", "de"), gate=RealGate("ranked_universe"), tolerance="exact")
     add("precision_adjusted", v1=None,
         func=functools.partial(de_sig_agreement, measure="markedness"), scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"))
+        agg="mean", profiles=("full", "de"), tolerance="exact")
     add("sig_recall_adjusted", v1=None,
         func=functools.partial(de_sig_agreement, measure="informedness"), scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"), gate=RealGate("sig_universe"))
+        agg="mean", profiles=("full", "de"), gate=RealGate("sig_universe"), tolerance="exact")
     add("sig_mcc", v1=None,
         func=functools.partial(de_sig_agreement, measure="mcc"), scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"), gate=RealGate("sig_universe"))
+        agg="mean", profiles=("full", "de"), gate=RealGate("sig_universe"), tolerance="exact")
     # Direction metrics: they score the DIRECTION of a call rather than set membership,
     # with explicit undefined-direction semantics (reference cannot adjudicate ->
     # excluded; model declined to commit -> miss). v2-native; the older
@@ -581,10 +619,12 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
     # Like `model_direction_match`: charged 0.0 when the prediction makes no adjudicable call, but
     # gated on the reference having adjudicable genes at all (codex, checkpoint 1).
     add("direction_precision", v1=None, func=de_direction_precision, scoring=BOUNDED,
-        agg="mean", profiles=("full", "de"), worst=0.0, gate=RealGate("adjudicable"))
+        agg="mean", profiles=("full", "de"), worst=0.0, gate=RealGate("adjudicable"),
+        tolerance="exact")
     add("direction_sensitivity", v1=None,
         func=functools.partial(de_direction_sensitivity, universe="adjudicated"),
-        scoring=BOUNDED, agg="mean", profiles=("full", "de"), gate=RealGate("sig_set"))
+        scoring=BOUNDED, agg="mean", profiles=("full", "de"), gate=RealGate("sig_set"),
+        tolerance="exact")
     # `_UP_OPEN`: the full-universe variant is unbounded above (k* is not capped by N_conf),
     # so an anchor of 1 would be false. It IS scored (it has a direction) but anchorless, so
     # it normalizes against its own baseline and is clamped. compat.score_agg_metrics knows
@@ -593,7 +633,8 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
     # have. See the note on `MetricSpec.best_value` -- the derived token cannot say this.
     add("direction_sensitivity_universe", v1=None,
         func=functools.partial(de_direction_sensitivity, universe="all"),
-        scoring=_UP_OPEN, agg="mean", profiles=("full", "de"), gate=RealGate("sig_set"))
+        scoring=_UP_OPEN, agg="mean", profiles=("full", "de"), gate=RealGate("sig_set"),
+        tolerance="exact")
 
     # Chance-corrected direction metrics (issue #195). Eleven suffixes x two methods.
     # APPENDED, not grouped with the v0.5.0 direction metrics above, so the ordered
@@ -674,7 +715,7 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
     # -- which still has to be overridden inside the dict, not as a second keyword, because
     # the base dict already binds it.
     _direction_kw = dict(v1=None, profiles=("full", "de"), worst=None,
-                         agg="mean", v1_avail=False)
+                         agg="mean", v1_avail=False, tolerance="exact")
     _direction_kw_2026 = {**_direction_kw, "profiles": ("full", "de", "vcc2026")}
     add("direction_fidelity", func=de_direction_fidelity, scoring=_UP_BOUNDED, **_direction_kw)
     add("direction_fidelity_raw", func=de_direction_fidelity_raw, scoring=_UP_BOUNDED,
@@ -716,7 +757,7 @@ def _register_de_family(catalog: dict[str, MetricSpec], *, method: str, v2_only:
     # `vcc2026` member, clip-at-0 removed (truncated depth -0.08/-0.07/-0.10 on the three
     # official arms -- its comparator sits near the metric's own floor).
     add("sig_jaccard", v1=None, func=de_sig_jaccard, scoring=_UP_UNFLOORED, agg="mean",
-        profiles=("full", "de", "vcc2026"))
+        profiles=("full", "de", "vcc2026"), tolerance="exact")
 
 
 _register_de_family(CATALOG, method="wilcoxon", v2_only=False)
@@ -749,6 +790,7 @@ def _register_cell_cov_family(catalog: dict[str, MetricSpec]) -> None:
             name=name, func=functools.partial(cov_metric, which=which),
             scoring=DIAG, agg="mean", profiles=("cell",), kind="cell",
             normalization=None,
+            tolerance="continuous",
         )
 
 
@@ -778,6 +820,7 @@ def _register_cell_cov_ccc(catalog: dict[str, MetricSpec]) -> None:
         name="cell_cov_ccc", func=cov_ccc_metric,
         scoring=DIAG, agg="mean", profiles=("cell",), kind="cell",
         normalization=None,
+        tolerance="continuous",
     )
 
 

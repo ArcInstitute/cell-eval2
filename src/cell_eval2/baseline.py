@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 
 from . import norm
 from .cache import fingerprint_adata, fingerprint_de_table
-from .catalog import CATALOG, _NAME_TO_CANONICAL, derived_policy, is_decisive, resolve_metrics
+from .catalog import (
+    CATALOG, METRICS_VERSION, _NAME_TO_CANONICAL, derived_policy, is_decisive, resolve_metrics,
+)
 from .config import EvalConfig, target_gene_entry
 from .de import load_de_table
 from .distances import resolve_exclusion_columns
@@ -720,6 +722,10 @@ def _baseline_policy_dict(names, *, comparator: str) -> dict:
     d["metric_derived"] = derived_policy(names)
     d["metric_normalization"] = [[n, effective_normalization(CATALOG[n], comparator)]
                                  for n in names]
+    # #412, design §5.4: omit the term at version 1 to preserve every existing digest.
+    versions = [[n, CATALOG[n].version] for n in names if CATALOG[n].version > 1]
+    if versions:
+        d["metric_version"] = versions
     return d
 
 
@@ -820,6 +826,7 @@ def config_digest(config: EvalConfig, *, comparator: str, de_real=None) -> str:
     and #314 proposes the shared registry all three should read instead.
     ``cell_eval2_version`` is not the fallback -- see the paragraph above, and note that #172
     lands WITHIN 0.13.0, so the stamp does not move for it at all.
+    From 0.20.0 a metric's ``version`` enters the digest once it exceeds 1 (#412, design §5.4).
 
     Deliberately NOT mirrored into ``run._result_config_digest``. That digest keys the RESULT
     cache, whose artifact is the per-perturbation tidy frame (``run.py``); ``agg`` is applied
@@ -1126,6 +1133,10 @@ def build_run_meta(config: EvalConfig, real, pred, *, de_real=None, de_pred=None
     names, _ = resolve_metrics(config.metrics, version=config.version)
     meta = {
         "cell_eval2_version": _version_lazy(),
+        # #412, design §5.5: recorded, never compared (not in SUBMISSION_PEERS,
+        # MANIFEST_RECORDED_ONLY or cli._check_baseline_config's tuple), and absent from
+        # evaluation_results.json (the schema's suite allows no extra key; Arc Bench decides).
+        "metrics_version": METRICS_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": str(real) if isinstance(real, (str, os.PathLike)) else "<in-memory AnnData>",
         "resolved_device": _cache_device(config),

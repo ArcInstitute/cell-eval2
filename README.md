@@ -29,7 +29,7 @@ cell-eval2 --help
 | extra | adds | when you need it |
 |---|---|---|
 | *(none)* | — | everything except GPU DE and out-of-core input |
-| `[gpu]` | `cupy-cuda12x`, `nvidia-nvcomp-cu12` | CUDA pseudobulk / distance / rank kernels |
+| `[gpu]` | `cupy-cuda12x`, `nvidia-nvcomp-cu12<6` | CUDA pseudobulk / distance / rank kernels |
 | `[gpudge]` | [`gpudge`](https://github.com/ArcInstitute/gpudge) | GPU differential expression |
 | `[scale]` | [`cellstream`](https://github.com/ArcInstitute/cellstream) | scoring `.csad` archives out of core |
 
@@ -174,7 +174,11 @@ print(res.overall)     # per_pert / per_context / overall frames
   which its reference bundles do not carry: `expr_mse_unbiased`, `expr_mse_unbiased_capped`, `expr_distance_unbiased`,
   and `expr_mse_unbiased_capped_norm`, which is derived from two of them. A selection that
   resolves to any of them — including the default `"full"`, `"anndata"` and `"vcc2026"` — raises
-  `NotImplementedError`. DE runs on gpudge only, so the `de_deseq2_*` metrics are unavailable.
+  `NotImplementedError`. The selection must also include `de_wilcoxon_nsig_counts_real` and
+  `de_wilcoxon_nsig_counts_pred`: the driver always reconstructs `de_wilcoxon_nsig_spearman` from
+  them, so a selection without them (the `"vcc"` and `"pds"` profiles, or `["expr_mae"]`) raises
+  `ValueError` after the whole DE run. `"de"` and `"minimal"` qualify. DE runs on gpudge only, so
+  the `de_deseq2_*` metrics are unavailable.
 - At matched settings, results equal in-memory `compute_metrics`: bit-exact on rank and DE
   metrics and within `1e-7` on continuous ones. One default differs: the `min_nonzero` AUC p-value
   floor does not split across batches, so this driver computes `preserve` instead (float64,
@@ -187,15 +191,30 @@ print(res.overall)     # per_pert / per_context / overall frames
   numbers.
 - Handles counts and lognorm across the whole config matrix; `input_type` is auto-detected from
   the archive.
+- Also scores the cell metrics (`cell_cov_ccc`, `cell_cov_corr`, `cell_cov_eig_ratio`), selected
+  by name next to a selection the first bullet allows (no moments metric, both nsig-count
+  metrics), in a separate pass after the partitioned loop (a cell-only selection belongs to
+  `compute_metrics`). These need both sides to resolve to raw
+  counts, and on a CUDA device `cell_cov_ccc` needs up to `21·G²` bytes (G = gene count) within
+  `mem_budget.gpu_bytes`; both are checked before any DE runs. Two of the pass's own checks also
+  run before any DE, when some perturbation has at least 50 cells on both sides: for
+  `cell_cov_corr` and `cell_cov_eig_ratio`, the target-gene resolution over the whole panel (a
+  construct-ID panel needs `target_gene_map`); and, with `validate_input` on and a version other
+  than v1, the value check on the predicted cells the pass would sample for the first such
+  perturbation. With those settings the pass still value-checks every block of cells it reads.
+  With `allow_discrete`, an archive resolves to counts without reading a value; the value checks
+  still run. The pass logs one `cell pass:` line with its wall time and GPU peaks.
 - Materializes perturbation-complete batches under an explicit memory budget.
 - The control label comes from a uniform `obs.control_value` column when the archive has one,
   otherwise from `EvalConfig.control` — so set it explicitly if your archive lacks that column.
 - Pass `outdir=...` to also write the `ScoreResult` frames there (`per_pert.parquet`,
-  `per_context.parquet`, `overall.parquet`). Add **`write_de=True`** to additionally emit the raw
+  `per_context.parquet`, `overall.parquet`) and, for v2, `evaluation_results.json`.
+  Add **`write_de=True`** to additionally emit the raw
   gene-level DE tables `de_real.parquet` + `de_pred.parquet` — the unthresholded tables the DE
   metrics consume, the same artifact the in-memory path writes under `--write-degenes`, here
   written through a pinned zstd-3 writer with bounded memory and published together with the three
-  score files (rollback on error). Off by default; requires `outdir` and at least one DE metric
+  score files and the evaluation document when present (rollback on error). Off by default;
+  requires `outdir` and at least one DE metric
   in the selection. See [`docs/de_tables.md`](docs/de_tables.md) for the exact contract.
 
   ```python
@@ -211,6 +230,28 @@ print(res.overall)     # per_pert / per_context / overall frames
   it instead of recomputing it. The real archive must carry a `payload_sha256` checksum. With
   `write_de=True` the outputs gain `ground_truth_de_cache.json`, recording the lookup. See
   [`docs/ground_truth_cache.md`](docs/ground_truth_cache.md).
+
+## Evaluation results (`evaluation_results.json`)
+
+`cell-eval2 run` writes `evaluation_results.json` beside `agg_results.csv` when scoring a
+prediction. `score_cellstream` writes it when given `outdir`: after the score frames normally,
+or staged and published with the other outputs under `write_de=True` (rollback on error).
+Runs with `version="v1"` or `de.backend="deseq2"` write no document; neither does the CLI's
+real-data-only mode.
+
+The document identifies each metric by its key and `version` within the `cell_eval2` suite,
+and carries its headline statistic, display name and description, resolved `suite.settings`,
+statistics and, for metrics with a perturbation axis, per-perturbation values.
+
+`cell-eval2 run --settings-from evaluation_results.json` reruns a call from its document;
+it requires `-ap`, is mutually exclusive with `--config` and `--preset`, and refuses `--profile`
+because the metrics come from the document. Flags or `--set` may change only output, cache,
+thread and `allow_fractional_counts` settings; any other change is refused. The run is also
+refused if a recorded fact differs from what the replay resolves: perturbation column, control
+label, effective input types, comparator, DE engine or scoring path. A streaming document is
+refused by the CLI because its `scoring_path` differs; replay it through
+`score_cellstream(config=settings_to_config(doc), check_facts=facts_checker(doc), ...)`, using
+`settings_to_config` and `facts_checker` exported from `cell_eval2`.
 
 ## Caching
 

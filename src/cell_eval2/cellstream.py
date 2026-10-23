@@ -8,8 +8,9 @@ module adds none. See internal:docs/internal/superpowers/specs/2026-07-21-cellst
 """
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,10 +20,14 @@ from . import norm as _norm
 from ._cell_archive import open_cell_store
 from .cell_source import cell_fingerprint
 from ._threads import resolve_gather_threads
+from .evaluation_results import FILENAME
 from .h5ad_manifest import plan_pert_batches
 
 if TYPE_CHECKING:
     import anndata as ad
+    import polars as pl
+
+    from .run import RunFacts
 
 logger = logging.getLogger(__name__)
 
@@ -297,12 +302,13 @@ def _uniform_obs(store, col, default) -> str:
 
 #: Everything one ``score_cellstream(write_de=True)`` call publishes into ``outdir``, in order --
 #: plus ``_GT_SIDECAR``, staged right after the two DE tables, when the ground-truth cache is on.
+#: #412 / design §2.1: the document publishes last, only when the call writes one (every v2 call).
 _WRITE_DE_OUTPUTS = ("de_real.parquet", "de_pred.parquet",
-                     "per_pert.parquet", "per_context.parquet", "overall.parquet")
+                     "per_pert.parquet", "per_context.parquet", "overall.parquet", FILENAME)
 
 #: The ground-truth DE cache's provenance sidecar (docs/ground_truth_cache.md §10): published by a
 #: ``write_de=True`` run only while that cache is on. With the cache off, ``outdir`` receives
-#: exactly ``_WRITE_DE_OUTPUTS``.
+#: exactly ``_WRITE_DE_OUTPUTS`` on v2; v1 omits the document (#412 / design §6.6).
 _GT_SIDECAR = "ground_truth_de_cache.json"
 
 
@@ -613,11 +619,202 @@ def _check_root_outside_outputs(root, outdir) -> None:
                 "or another directory in it, is fine)")
 
 
+def _check_cell_pass_inputs(cell_names, effective_types, *, n_genes, mem_budget,
+                            device) -> None:
+    """Refuse, before any DE work, a cell pass that could only fail at its end: a side whose
+    resolved input type is not raw counts, or, when ``cell_cov_ccc`` runs on CUDA (``device``,
+    resolved), a GPU budget below ``21 * G**2`` bytes, the upper end of its documented
+    peak-scratch range (``docs/metrics.md`` §8.3). No budget check without a ``mem_budget``."""
+    for side in ("pred", "real"):
+        if effective_types[side] != "counts":
+            raise ValueError(
+                f"cell metric(s) {cell_names} need raw counts on both sides, but the {side} side "
+                f"resolved to input_type={effective_types[side]!r}. Score these metrics on a "
+                "counts pair, or deselect them."
+            )
+    if "cell_cov_ccc" in cell_names and mem_budget is not None and device == "cuda":
+        need = 21 * n_genes ** 2
+        if need > mem_budget.gpu_bytes:
+            raise ValueError(
+                f"cell_cov_ccc needs up to 21 * G**2 = {need} bytes of GPU scratch at G={n_genes} "
+                f"genes, above mem_budget.gpu_bytes={mem_budget.gpu_bytes}. Raise the budget, "
+                "or deselect cell_cov_ccc."
+            )
+
+
+#: The cell metrics that exclude each perturbation's own target gene (``CellsPrep.scored_genes``).
+_TARGET_EXCLUDING_CELL_METRICS = ("cell_cov_corr", "cell_cov_eig_ratio")
+
+
+def _precheck_cell_pass(pred, real, cfg, cell_names, effective_types) -> None:
+    """Run, before any DE work, two of the cell pass's own checks, when some perturbation has at
+    least ``min_cells`` cells on both sides: for ``_TARGET_EXCLUDING_CELL_METRICS``, the
+    target-gene resolution over the whole panel; and, when ``_cell_block_validator`` is on, the
+    value check on the predicted cells the pass would sample for the first such perturbation."""
+    import inspect
+
+    from .catalog import CATALOG
+    from .cells_prep import CellsPrep
+    from .run import _cell_block_validator
+
+    validate = _cell_block_validator(cfg, effective_types)
+    if validate is None and not any(n in _TARGET_EXCLUDING_CELL_METRICS for n in cell_names):
+        return
+    params = inspect.signature(CATALOG[cell_names[0]].func).parameters
+    max_cells, seed, min_cells = (params[k].default for k in ("max_cells", "seed", "min_cells"))
+
+    def _validate_pred(side, block):
+        if side == "pred":
+            validate(side, block)
+
+    with _cell_store_sources(pred, real, cfg) as (pred_src, real_src):
+        prep = CellsPrep(
+            pred_src, real_src, pert_col=cfg.pert_col, control=cfg.control,
+            genes=np.asarray(real_src.var_names, dtype=str), target_gene_map=cfg.target_gene_map,
+            input_type_pred=effective_types["pred"], input_type_real=effective_types["real"],
+            max_cells=max_cells, seed=seed,
+            validate_cells=None if validate is None else _validate_pred)
+        # The pass skips a perturbation below min_cells without reading its cells.
+        first = next((p for p in prep.perts if prep.depth(p) >= min_cells), None)
+        if first is None:
+            return
+        paired = validate is None
+        for name in cell_names:   # the pass's order: of two failing checks, its first one raises
+            if name in _TARGET_EXCLUDING_CELL_METRICS:
+                prep._excl_by_pert   # resolves through the pass's own call, or raises its error
+            if not paired:
+                prep.pair(first)
+                paired = True
+
+
+@contextlib.contextmanager
+def _cell_store_sources(pred, real, cfg):
+    """Open the two archives as :class:`~cell_eval2.cell_rowsource.CellStoreSource` handles and
+    yield ``(pred_src, real_src)``; both close on exit, the pred one also when the real archive
+    fails to open."""
+    from .cell_rowsource import CellStoreSource
+
+    with contextlib.ExitStack() as stack:
+        pred_src = CellStoreSource(pred, gather_threads=cfg.gather_threads)
+        stack.callback(pred_src.close)
+        real_src = CellStoreSource(real, gather_threads=cfg.gather_threads)
+        stack.callback(real_src.close)
+        yield pred_src, real_src
+
+
+def _cupy_peak_hook():
+    """A CuPy memory hook that records the default pool's used-bytes high-water mark, or None
+    when CuPy is not usable here."""
+    try:
+        import cupy
+
+        class _PeakHook(cupy.cuda.MemoryHook):
+            name = "cell_eval2_cell_pass_peak"
+
+            def __init__(self, pool):
+                self.pool = pool
+                self.peak = int(pool.used_bytes())
+
+            # Used bytes rise only at a pool malloc, so the max over malloc events is the true
+            # peak, even after the arrays are freed. Hooks are thread-local: the cell metrics
+            # allocate on this thread (the gather threads decode on the CPU).
+            def malloc_postprocess(self, **kwargs):
+                try:
+                    self.peak = max(self.peak, int(self.pool.used_bytes()))
+                except Exception:
+                    pass   # runs inside CuPy's malloc: never fail an allocation over a reading
+
+        return _PeakHook(cupy.get_default_memory_pool())
+    except Exception:
+        return None
+
+
+def _run_cell_pass(pred, real, cfg, cell_names, effective_types) -> "pl.DataFrame":
+    """Score the cell metrics on the two archives after the partitioned loop, and log one
+    ``cell pass:`` INFO line (wall time, torch and CuPy GPU high-water marks; -1 where a value
+    cannot be measured) whether the pass succeeds or fails. Returns the tidy rows.
+
+    The pass returns the CuPy pool's cached blocks and empties torch's CUDA cache, where present,
+    before it starts and again after it ends, also when it fails."""
+    import sys
+    from time import perf_counter
+
+    from .gpu import _release_gpu_pool
+    from .run import _score_cell_metrics_on_sources
+
+    t0 = perf_counter()
+    hook = None   # set only once the hook is entered
+    torch_reset = False
+    peak_torch = -1
+    # Never imported here: _require_partition_config already imported it for the gpudge check.
+    torch = sys.modules.get("torch")
+    try:
+        _release_gpu_pool()   # with CuPy present, its gc also frees unreachable tensors first
+        if torch is not None:
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats()
+                    torch_reset = True
+            except Exception:
+                pass
+        candidate = _cupy_peak_hook()
+        if candidate is not None:
+            try:
+                candidate.__enter__()
+                hook = candidate
+            except Exception:
+                pass
+        with _cell_store_sources(pred, real, cfg) as (pred_src, real_src):
+            return _score_cell_metrics_on_sources(pred_src, real_src, cfg, cell_names,
+                                                  effective_types=effective_types,
+                                                  driver="score_cellstream (cell pass)")
+    finally:
+        if hook is not None:
+            try:
+                hook.__exit__(None, None, None)
+            except Exception:
+                pass
+        if torch_reset:   # a peak read without this pass's reset would cover the whole run
+            try:
+                peak_torch = int(torch.cuda.max_memory_allocated())
+            except Exception:
+                peak_torch = -1
+        logger.info(
+            "cell pass: metrics=%s wall_s=%.3f peak_torch_bytes=%d peak_cupy_bytes=%d",
+            ",".join(cell_names), perf_counter() - t0, peak_torch,
+            hook.peak if hook is not None else -1)
+        # After the log line, so wall_s spans the pass alone; never replaces the pass's error.
+        try:
+            _release_gpu_pool()
+        except Exception:
+            pass
+        if torch_reset:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+
 def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_de=False,
-                     ground_truth_cache=None, ground_truth_cache_policy="readwrite"):
+                     ground_truth_cache=None, ground_truth_cache_policy="readwrite",
+                     check_facts: Callable[[RunFacts], None] | None = None):
     """Score a pair of cell-layout ``.shad`` archives (single context) on the ``partition_inmem``
     engine. Handles counts and lognorm (via the shared in-memory ``compute_de`` + ``_side_bulks``).
     Returns a ``ScoreResult`` (per_pert / per_context / overall). GPU-only (gpudge backend).
+
+    Cell metrics (``kind == "cell"``, e.g. ``cell_cov_ccc``) score in a separate pass after the
+    partitioned loop, on the two archives directly. They need raw counts on both sides, and
+    ``cell_cov_ccc`` needs up to ``21 * G**2`` bytes within ``mem_budget.gpu_bytes`` when it runs
+    on CUDA; both are checked before any DE runs. Two of the pass's own checks also run then,
+    when some perturbation has at least 50 cells on both sides: the target-gene resolution of
+    ``cell_cov_corr`` / ``cell_cov_eig_ratio`` over the whole panel, and (with ``validate_input``
+    on and a version other than v1) the value check on the predicted cells the pass would sample
+    for the first such perturbation. A selection of cell metrics only is refused: use
+    ``compute_metrics``.
+    The pass logs one ``cell pass:`` INFO line (``metrics``, ``wall_s``, ``peak_torch_bytes``,
+    ``peak_cupy_bytes``). To measure its own peak, it resets torch's peak-memory statistics on
+    the current CUDA device when torch is loaded and CUDA is available.
 
     ``write_de`` (#387; hardened in the #389 split -- ``de_export``): also emit the raw gene-level
     DE tables to ``outdir`` as ``de_real.parquet`` + ``de_pred.parquet``. ``de_real`` is the
@@ -626,11 +823,25 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     glob-then-sort over piece file names -- at 12+ batches lexicographic sort would put ``ctx_10``
     before ``ctx_2``). Both are written through ``de_export``'s pinned contract (zstd level 3,
     statistics, 250k-row row groups) one source row group at a time, never a ``pl.concat`` of
-    everything -- a production ``de_pred`` is ~16.5M rows. All five output files (the two DE tables
+    everything -- a production ``de_pred`` is ~16.5M rows. The five existing output files (the two DE tables
     and the three ``ScoreResult`` frames) are staged first and then published together,
     rollback-on-error (``_StagedOutputs`` -- NOT atomic visibility as a group), so a failure before
     or during publication leaves ``outdir`` as it was. Requires ``outdir`` and at least one DE
     metric in the selection. Off by default, so existing callers are unaffected.
+
+    #412 / design §2.1 and §6.6: a v2 call with ``outdir`` also writes
+    ``evaluation_results.json``, built after the cell pass and before any staging so a refused
+    document leaves the earlier outputs untouched. With ``write_de=True`` it publishes last
+    inside the same rollback transaction; otherwise it is written after the score frames.
+    Calls that do not stage a document remove an earlier one before publishing new outputs,
+    so a failed rerun cannot leave stale settings beside new scores. v1 logs its exclusion once.
+    With ``outdir=None`` no result files are written.
+
+    ``check_facts`` (#412 / design §9): an optional replay check called once after comparator
+    resolution, before the cell prechecks and reference builder. Its preliminary ``RunFacts``
+    carries the resolved control and grouping column, empty labels and the configured target
+    sum. Raising refuses the replay before scoring; use ``settings.facts_checker`` for a saved
+    document's facts.
 
     ``ground_truth_cache`` / ``ground_truth_cache_policy`` (the ground-truth DE cache --
     ``docs/ground_truth_cache.md``): ``ground_truth_cache=None`` (the default) leaves the cache
@@ -642,7 +853,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     is fingerprinted before any DE runs, so one without a strong ``payload_sha256`` fails fast
     (``GroundTruthFingerprintError``); a committed entry that fails validation raises
     ``GroundTruthCacheCorruptError`` and is never overwritten. With ``write_de=True`` the publish
-    carries a sixth file, ``ground_truth_de_cache.json``, recording the lookup's outcome, and
+    also carries ``ground_truth_de_cache.json``, recording the lookup's outcome, and
     ``de_real.parquet`` is a verified byte copy of the cache entry. Neither argument is an
     ``EvalConfig`` field, so neither can move a scoring digest.
     """
@@ -658,6 +869,12 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     # Imported HERE, per call, not at module load: a test patches de_compute._resolve_backend and
     # must reach this binding (partition_inmem binds its own copy at import time).
     from .de_compute import _resolve_backend
+    from .evaluation_results import (
+        build_document,
+        no_document_reason,
+        remove_stale_document,
+        write_document,
+    )
     from .ground_truth_cache import (
         CACHE_POLICIES,
         GroundTruthDEGCache,
@@ -676,7 +893,8 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
         _require_partition_config,
         score_piece,
     )
-    from .run import _cache_device, _resolve_config
+    from .run import RunFacts, _cache_device, _resolve_config, metric_output_names
+    from .settings import check_recordable
     from .h5ad_manifest import _assemble_score_result, _nsig_names
 
     # Fail fast, before any archive I/O, on the one combination that cannot be honoured: the DE
@@ -707,9 +925,31 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     cfg = _require_partition_config(_resolve_config(config, {}))
     if cfg.pert_col == "target":
         cfg = replace(cfg, pert_col="perturbation")
-    # Before any archive is read (#395): this driver carries no cells.
-    from .run import _refuse_cell_metrics_up_front
-    cfg = _refuse_cell_metrics_up_front(cfg, driver="score_cellstream (partitioned in-memory)")
+    # A one-shot iterable selection is frozen to a list so later resolutions still see it.
+    if not isinstance(cfg.metrics, (str, list, tuple)):
+        cfg = replace(cfg, metrics=list(cfg.metrics))
+    _selected, _ = resolve_metrics(cfg.metrics, version=cfg.version)
+    cell_names = [n for n in _selected if CATALOG[n].kind == "cell"]
+    if cell_names:
+        rest = [n for n in _selected if CATALOG[n].kind != "cell"]
+        if not rest:
+            raise NotImplementedError(
+                f"metric(s) {cell_names} are all cell metrics: score_cellstream scores cell "
+                "metrics only in a pass after its partitioned metrics. Use compute_metrics, "
+                "which scores a cell-only selection on two .shad archives directly."
+            )
+        cfg = replace(cfg, metrics=rest)
+
+    # #412 / design §8.2: refuse lossy settings before scoring, and retain the cell metrics
+    # in the document's selection even though the partitioned pass uses only the rest.
+    reason = no_document_reason(cfg) if outdir is not None else None
+    write_doc = outdir is not None and reason is None
+    if write_doc:
+        check_recordable(cfg)
+    if reason is not None:
+        logger.warning("%s", reason)
+    expected = metric_output_names(replace(cfg, metrics=_selected))
+    de_used = any(CATALOG[n].kind == "de" for n in _selected)
 
     # Fail fast on the other unhonourable write_de combination: a metric selection that resolves
     # to no DE-kind metric would score_piece every batch, write zero {piece_id}__de_pred.parquet
@@ -754,6 +994,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
         real_itype = _resolve_input_type_cell(real_store, cfg)
         dataset_tag = _uniform_obs(real_store, "dataset", "cellstream")
         context_tag = _uniform_obs(real_store, "context", "all")
+        n_genes = int(real_store.n_vars) if cell_names else None
     finally:
         real_store.close()
     pred_store = open_cell_store(pred)
@@ -766,6 +1007,21 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
         pred_input_type=pred_itype,
         real_input_type=real_itype,
     )
+    # #412 / design §9: the archive's control_value and rewritten pert_col are replay facts;
+    # check them before even the cell prechecks can gather cells or dispatch metric work.
+    if check_facts is not None:
+        check_facts(RunFacts(
+            config=replace(cfg, control=control),
+            input_type_real=real_itype, input_type_pred=pred_itype, comparator=comparator,
+            device=_cache_device(cfg),
+            de_backend=(_resolve_backend(cfg.de.backend) if de_used else cfg.de.backend),
+            de_backend_used=de_used, scoring_path="streaming", labels=()))
+    if cell_names:
+        cell_cfg = replace(cfg, control=control)
+        cell_types = {"pred": pred_itype, "real": real_itype}
+        _check_cell_pass_inputs(cell_names, cell_types, n_genes=n_genes, mem_budget=mem_budget,
+                                device=_cache_device(cell_cfg))
+        _precheck_cell_pass(pred, real, cell_cfg, cell_names, cell_types)
 
     # The real-DE provider, handed to the reference builder ONLY while the cache is on (spec §6,
     # ruling 6). It keys the lookup with the semantic document built from what this run resolved,
@@ -800,6 +1056,8 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
 
     nsig_spearman, nsig_real, nsig_pred = _nsig_names(cfg)
     staging = None   # a _StagedOutputs once write_de has staged its DE tables
+    doc = None
+    scored_labels: set[str] = set()
     # ONE cleanup scope from here to the publish: the temporary directories' teardown and the
     # score-frame assembly both run after the DE tables are staged, so a failure (or an
     # interrupt) in either must still remove the staged temps from outdir.
@@ -820,7 +1078,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                             f"the real archive {os.fspath(real)!r} changed while this run read "
                             f"it: ground-truth fingerprint {gt_fp.sha256} at the first open, "
                             f"{fp_again.sha256} at the second. Nothing was computed or cached.")
-                _build_reference_streaming_core(
+                ref_manifest = _build_reference_streaming_core(
                     real_src, config=cfg, cache_dir=ref_dir, mem_budget=mem_budget,
                     input_type=real_itype, native_gpu_normalize=True, comparator=comparator,
                     real_de_provider=_real_de_provider if gt_cache_on else None)
@@ -862,6 +1120,8 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                                        gather_threads=cfg.gather_threads)
             try:
                 for k, (batch_perts, batch_ad) in enumerate(pred_src.iter_pert_batches(mem_budget)):
+                    # #412 / design §6.4: CellBatchSource yields prediction labels, without control.
+                    scored_labels.update(map(str, batch_perts))
                     piece_id = f"ctx_{k}"
                     score_piece(batch_ad, ref_dir, config=piece_cfg,
                                 piece_id=piece_id, partial_out=parts_dir, bundle=bundle,
@@ -893,6 +1153,26 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                 parts_dir, reduce_nsig_spearman=True, nsig_spearman_metric=nsig_spearman,
                 nsig_real_metric=nsig_real, nsig_pred_metric=nsig_pred)
 
+            # The cell pass, before anything is staged: a failure here leaves outdir untouched.
+            if cell_names:
+                cell_rows = _run_cell_pass(pred, real, cell_cfg, cell_names, cell_types)
+                full = pl.concat([full, cell_rows], how="vertical")
+
+            # #412 / design §8.2–8.3: only None is resolved by the manifest; its float storage
+            # must not change an explicit integer's replay identity. Build before staging so
+            # validation cannot disturb any earlier output, including its document.
+            if write_doc:
+                facts = RunFacts(
+                    config=replace(cfg, control=control, target_sum=(
+                        cfg.target_sum if cfg.target_sum is not None
+                        else ref_manifest["normalize_target_sum"])),
+                    input_type_real=real_itype, input_type_pred=pred_itype, comparator=comparator,
+                    device=_cache_device(cfg),
+                    de_backend=(_resolve_backend(cfg.de.backend) if de_used else cfg.de.backend),
+                    de_backend_used=de_used, scoring_path="streaming",
+                    labels=tuple(sorted(scored_labels)))
+                doc = build_document(full, facts, metrics=expected)
+
             # DE-table staging, INSIDE the with-block: ref_dir (real DE) and de_parts_dir (per-piece
             # pred DE) are both torn down when it exits, so the source files must be read out here
             # (#387). Nothing is published yet -- the two DE tables are published together with the
@@ -914,7 +1194,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                                   real_de_sha256=(gt_result.de_real_sha256
                                                   if gt_result is not None else None))
                 if gt_result is not None:
-                    # The sixth file: staged with the DE tables, so it publishes -- and rolls
+                    # The cache sidecar: staged with the DE tables, so it publishes -- and rolls
                     # back -- with them and the three score frames (spec §6.6). Its
                     # de_real_sha256 is the cache entry's, and the de_real.parquet staged above
                     # IS that entry: a byte copy, verified against it as it was copied.
@@ -936,17 +1216,25 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
         )
         result = _assemble_score_result([full])
         if staging is not None:
-            # write_de: the score frames join the staged DE tables and all five publish together.
+            # #412 / design §2.1: the document joins the frames last so rollback restores it too.
             for name, frame in (("per_pert.parquet", result.per_pert),
                                 ("per_context.parquet", result.per_context),
                                 ("overall.parquet", result.overall)):
                 staging.stage(name, frame.write_parquet)
+            if doc is not None:
+                staging.stage(FILENAME, lambda tmp: write_document(doc, tmp))
+            else:
+                remove_stale_document(outdir)
             staging.publish()
         elif outdir is not None:
+            # #412 / design §6.6: a failed plain write must not leave an earlier document.
+            remove_stale_document(outdir)
             os.makedirs(outdir, exist_ok=True)
             result.per_pert.write_parquet(os.path.join(outdir, "per_pert.parquet"))
             result.per_context.write_parquet(os.path.join(outdir, "per_context.parquet"))
             result.overall.write_parquet(os.path.join(outdir, "overall.parquet"))
+            if doc is not None:
+                write_document(doc, os.path.join(outdir, FILENAME))
     except BaseException:
         if staging is not None:
             staging.discard()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Literal
@@ -512,6 +513,14 @@ class EvalConfig:
         }
         if name not in alias:
             raise ValueError(f"unknown preset {name!r}; choose from {sorted(alias)}")
+        # Design §11 (#412) retires the v1 presets; EvalConfig.version stays.
+        if alias[name] in ("v1", "cell-eval-0.7.6"):
+            warnings.warn(
+                f"preset {name!r} is deprecated: the v1 presets will be removed in a later "
+                "release (EvalConfig.version stays)",
+                FutureWarning,
+                stacklevel=2,
+            )
         from importlib.resources import files
 
         text = files("cell_eval2").joinpath("configs", f"{alias[name]}.yaml").read_text(encoding="utf-8")

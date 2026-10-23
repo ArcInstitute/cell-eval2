@@ -387,9 +387,9 @@ def _ccc_table(prep, *, min_cells: int, device: str,
     but the two archives. By default (``significance='intersection'``) only pairs significantly
     correlated on BOTH sides enter the CCC; zero-variance and non-significant pairs drop out.
     Reading only the ≤``max_cells`` cells :meth:`pair` samples per side, a streaming source
-    (``CellStoreSource``) touches no control pool and no full group. A perturbation is OMITTED (not
-    filled) below ``min_cells`` common depth, or when fewer than three pairs survive the gate;
-    ``agg='mean'`` skips a missing key and the metric is unscored, so an omission costs no score.
+    (``CellStoreSource``) touches no control pool and no full group. A perturbation is OMITTED (no
+    key) below ``min_cells`` common depth, and is NaN when fewer than three pairs survive the gate;
+    ``agg='mean'`` skips both and the metric is unscored, so neither costs a score.
     The GPU caching pool is released after each perturbation so one pert's ~G×G matrices do not
     accumulate across the loop.
     """

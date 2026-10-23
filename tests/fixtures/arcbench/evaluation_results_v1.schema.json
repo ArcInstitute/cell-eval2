@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:arcbench:evaluation-results:1",
+  "title": "Evaluation results, schema version 1",
+  "type": "object",
+  "required": ["schema_version", "suite", "statistics", "axes", "metrics"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "suite": {
+      "type": "object",
+      "required": ["name", "version", "commit", "settings"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/slug"},
+        "version": {"type": "string", "minLength": 1},
+        "commit": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{40}(?![\\s\\S])"}, {"type": "null"}]},
+        "settings": {"type": "object"}
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/slug"},
+      "additionalProperties": {"$ref": "#/$defs/statistic"}
+    },
+    "axes": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/slug"},
+      "additionalProperties": {"$ref": "#/$defs/axis"}
+    },
+    "facets": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/slug"},
+      "additionalProperties": {"$ref": "#/$defs/declaration"}
+    },
+    "metrics": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/slug"},
+      "additionalProperties": {"$ref": "#/$defs/metric"}
+    }
+  },
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9_]*(?![\\s\\S])"},
+    "label": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*(?![\\s\\S])"},
+    "text": {"type": "string", "minLength": 1},
+    "value": {"type": ["number", "null"]},
+    "declaration": {
+      "type": "object",
+      "required": ["display_name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {"$ref": "#/$defs/text"},
+        "description": {"$ref": "#/$defs/text"}
+      }
+    },
+    "statistic": {
+      "type": "object",
+      "required": ["display_name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {"$ref": "#/$defs/text"},
+        "description": {"$ref": "#/$defs/text"},
+        "combine": {"enum": ["mean", "sum", "none"]}
+      }
+    },
+    "axis": {
+      "type": "object",
+      "required": ["display_name", "description", "labels"],
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {"$ref": "#/$defs/text"},
+        "description": {"$ref": "#/$defs/text"},
+        "labels": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "headline": {
+      "type": "object",
+      "required": ["statistic", "direction"],
+      "additionalProperties": false,
+      "properties": {
+        "statistic": {"$ref": "#/$defs/slug"},
+        "direction": {"enum": ["higher", "lower", null]},
+        "min": {"type": "number"},
+        "max": {"type": "number"}
+      }
+    },
+    "metric": {
+      "type": "object",
+      "required": ["version", "headline", "display_name", "description", "statistics"],
+      "additionalProperties": false,
+      "dependentRequired": {"axis": ["values"], "values": ["axis"]},
+      "properties": {
+        "version": {"type": "integer", "minimum": 0},
+        "headline": {"$ref": "#/$defs/headline"},
+        "axis": {"$ref": "#/$defs/slug"},
+        "display_name": {"$ref": "#/$defs/text"},
+        "description": {"$ref": "#/$defs/text"},
+        "aliases": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/label"},
+          "uniqueItems": true
+        },
+        "facets": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/slug"},
+          "additionalProperties": {"$ref": "#/$defs/text"}
+        },
+        "statistics": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/slug"},
+          "additionalProperties": {"$ref": "#/$defs/value"}
+        },
+        "values": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/value"}
+        }
+      }
+    }
+  }
+}

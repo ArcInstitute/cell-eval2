@@ -1,0 +1,889 @@
+{
+  "active": [
+    "cell_cov_ccc",
+    "cell_cov_corr",
+    "cell_cov_eig_ratio",
+    "de_deseq2_direction_coverage",
+    "de_deseq2_direction_fidelity",
+    "de_deseq2_direction_fidelity_raw",
+    "de_deseq2_direction_fidelity_yield",
+    "de_deseq2_direction_fidelity_yield_raw",
+    "de_deseq2_direction_match",
+    "de_deseq2_direction_precision",
+    "de_deseq2_direction_reach",
+    "de_deseq2_direction_reach_raw",
+    "de_deseq2_direction_reach_unbounded",
+    "de_deseq2_direction_reach_unbounded_raw",
+    "de_deseq2_direction_sensitivity",
+    "de_deseq2_direction_sensitivity_universe",
+    "de_deseq2_direction_yield",
+    "de_deseq2_direction_yield_raw",
+    "de_deseq2_lfc_nmae",
+    "de_deseq2_lfc_spearman",
+    "de_deseq2_lfc_spearman_neg",
+    "de_deseq2_lfc_spearman_pos",
+    "de_deseq2_model_direction_match",
+    "de_deseq2_nsig_counts_pred",
+    "de_deseq2_nsig_counts_real",
+    "de_deseq2_nsig_spearman",
+    "de_deseq2_overlap",
+    "de_deseq2_overlap_adjusted",
+    "de_deseq2_overlap_top100",
+    "de_deseq2_overlap_top200",
+    "de_deseq2_overlap_top50",
+    "de_deseq2_overlap_top500",
+    "de_deseq2_pr_auc",
+    "de_deseq2_precision",
+    "de_deseq2_precision_adjusted",
+    "de_deseq2_precision_top100",
+    "de_deseq2_precision_top200",
+    "de_deseq2_precision_top50",
+    "de_deseq2_precision_top500",
+    "de_deseq2_roc_auc",
+    "de_deseq2_sig_jaccard",
+    "de_deseq2_sig_mcc",
+    "de_deseq2_sig_recall",
+    "de_deseq2_sig_recall_adjusted",
+    "de_wilcoxon_direction_coverage",
+    "de_wilcoxon_direction_fidelity",
+    "de_wilcoxon_direction_fidelity_raw",
+    "de_wilcoxon_direction_fidelity_yield",
+    "de_wilcoxon_direction_fidelity_yield_raw",
+    "de_wilcoxon_direction_match",
+    "de_wilcoxon_direction_precision",
+    "de_wilcoxon_direction_reach",
+    "de_wilcoxon_direction_reach_raw",
+    "de_wilcoxon_direction_reach_unbounded",
+    "de_wilcoxon_direction_reach_unbounded_raw",
+    "de_wilcoxon_direction_sensitivity",
+    "de_wilcoxon_direction_sensitivity_universe",
+    "de_wilcoxon_direction_yield",
+    "de_wilcoxon_direction_yield_raw",
+    "de_wilcoxon_lfc_nmae",
+    "de_wilcoxon_lfc_spearman",
+    "de_wilcoxon_lfc_spearman_neg",
+    "de_wilcoxon_lfc_spearman_pos",
+    "de_wilcoxon_model_direction_match",
+    "de_wilcoxon_nsig_counts_pred",
+    "de_wilcoxon_nsig_counts_real",
+    "de_wilcoxon_nsig_spearman",
+    "de_wilcoxon_overlap",
+    "de_wilcoxon_overlap_adjusted",
+    "de_wilcoxon_overlap_top100",
+    "de_wilcoxon_overlap_top200",
+    "de_wilcoxon_overlap_top50",
+    "de_wilcoxon_overlap_top500",
+    "de_wilcoxon_pr_auc",
+    "de_wilcoxon_precision",
+    "de_wilcoxon_precision_adjusted",
+    "de_wilcoxon_precision_top100",
+    "de_wilcoxon_precision_top200",
+    "de_wilcoxon_precision_top50",
+    "de_wilcoxon_precision_top500",
+    "de_wilcoxon_roc_auc",
+    "de_wilcoxon_sig_jaccard",
+    "de_wilcoxon_sig_mcc",
+    "de_wilcoxon_sig_recall",
+    "de_wilcoxon_sig_recall_adjusted",
+    "delta_mae",
+    "delta_mse",
+    "delta_pearson",
+    "expr_distance_unbiased",
+    "expr_mae",
+    "expr_mse",
+    "expr_mse_unbiased",
+    "expr_mse_unbiased_capped",
+    "expr_mse_unbiased_capped_norm",
+    "expr_real_mass_ratio",
+    "pds_cosine",
+    "pds_l1",
+    "pds_l2"
+  ],
+  "history": {
+    "cell_cov_ccc": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "cell_cov_corr": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "cell_cov_eig_ratio": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "de_deseq2_direction_coverage": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_fidelity": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_fidelity_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_fidelity_yield": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_fidelity_yield_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_match": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_precision": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_reach": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_reach_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_reach_unbounded": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_reach_unbounded_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_sensitivity": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_sensitivity_universe": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_yield": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_direction_yield_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_lfc_nmae": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "lower",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "de_deseq2_lfc_spearman": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_lfc_spearman_neg": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_lfc_spearman_pos": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_model_direction_match": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_nsig_counts_pred": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_nsig_counts_real": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_nsig_spearman": {
+      "1": {
+        "axis": null,
+        "direction": "higher",
+        "statistic": "value",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_overlap": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_overlap_adjusted": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_overlap_top100": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_overlap_top200": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_overlap_top50": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_overlap_top500": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_pr_auc": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "de_deseq2_precision": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_precision_adjusted": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_precision_top100": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_precision_top200": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_precision_top50": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_precision_top500": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_roc_auc": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "de_deseq2_sig_jaccard": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_sig_mcc": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_sig_recall": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_deseq2_sig_recall_adjusted": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_coverage": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_fidelity": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_fidelity_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_fidelity_yield": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_fidelity_yield_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_match": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_precision": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_reach": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_reach_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_reach_unbounded": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_reach_unbounded_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_sensitivity": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_sensitivity_universe": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_yield": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_direction_yield_raw": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_lfc_nmae": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "lower",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "de_wilcoxon_lfc_spearman": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_lfc_spearman_neg": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_lfc_spearman_pos": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_model_direction_match": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_nsig_counts_pred": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_nsig_counts_real": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_nsig_spearman": {
+      "1": {
+        "axis": null,
+        "direction": "higher",
+        "statistic": "value",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_overlap": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_overlap_adjusted": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_overlap_top100": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_overlap_top200": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_overlap_top50": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_overlap_top500": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_pr_auc": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "de_wilcoxon_precision": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_precision_adjusted": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_precision_top100": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_precision_top200": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_precision_top50": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_precision_top500": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_roc_auc": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "de_wilcoxon_sig_jaccard": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_sig_mcc": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_sig_recall": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "de_wilcoxon_sig_recall_adjusted": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "delta_mae": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "lower",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "delta_mse": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "lower",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "delta_pearson": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "expr_distance_unbiased": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "expr_mae": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "lower",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "expr_mse": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "lower",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "expr_mse_unbiased": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "expr_mse_unbiased_capped": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "expr_mse_unbiased_capped_norm": {
+      "1": {
+        "axis": null,
+        "direction": "lower",
+        "statistic": "ratio_of_sums",
+        "tolerance": "continuous"
+      }
+    },
+    "expr_real_mass_ratio": {
+      "1": {
+        "axis": "perturbation",
+        "direction": null,
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
+    "pds_cosine": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "pds_l1": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    },
+    "pds_l2": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "exact"
+      }
+    }
+  },
+  "metrics_version": 1
+}

@@ -9,6 +9,7 @@ from .config import DiscriminationParams, EvalConfig, FilterParams
 from .run import aggregate_metrics, aggregate_metrics_wide, compute_metrics, precompute_cache
 from .baseline import BaselineResult, build_generic_baseline
 from .score import score_metrics
+from .settings import facts_checker, settings_to_config
 from .h5ad_manifest import MemBudget, ScoreResult, score_h5ad_manifest
 from .rowstore import read_rowstore_plan, score_rowstore
 from .ground_truth_cache import fingerprint_ground_truth_cell_archive
@@ -38,6 +39,7 @@ __all__ = [
     "aggregate_metrics_wide",
     "build_generic_baseline",
     "cell_archive_input_type",
+    "facts_checker",
     "fingerprint_ground_truth_cell_archive",
     "precompute_cache",
     "score_metrics",
@@ -45,4 +47,5 @@ __all__ = [
     "score_h5ad_manifest",
     "read_rowstore_plan",
     "score_rowstore",
+    "settings_to_config",
 ]

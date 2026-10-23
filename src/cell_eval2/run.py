@@ -5,8 +5,9 @@ import logging
 import math
 import os
 import uuid
-from collections.abc import Mapping, Sequence
-from dataclasses import fields, replace
+import warnings
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, fields, replace
 
 import anndata as ad
 import numpy as np
@@ -20,7 +21,7 @@ from .config import DEParams, DiscriminationParams, EvalConfig, FilterParams
 from .de import assemble_prepared_de, prep_de_side, rank_de_side, resolve_target_genes
 from .gpu import resolve_device
 from .io import load_anndata, validate_pair
-from .metrics.de import de_lfc_nmae, de_sig_jaccard
+from .metrics.de import de_lfc_nmae, de_pr_auc, de_sig_jaccard
 from .metrics.direction import de_direction_reach
 from .metrics.delta import distance_unbiased, mse_unbiased, mse_unbiased_capped
 from .metrics.discrimination import discrimination_score
@@ -33,6 +34,28 @@ from .streaming_bulk import inmem_pseudobulk
 logger = logging.getLogger(__name__)
 
 _TIDY_SCHEMA = {"perturbation": pl.Utf8, "metric": pl.Utf8, "value": pl.Float64}
+
+
+@dataclass(frozen=True)
+class RunFacts:
+    """The run-time facts behind `suite.settings` (#412, design §8.3), captured where
+    the run resolves them, after detection and before any metric runs.
+
+    Built by `_run_metrics` and `_run_cell_metrics_streaming`, both on the in-memory
+    API path (scoring_path="in_memory").
+    """
+
+    config: EvalConfig            # the config the metrics ran under, resolved
+    input_type_real: str          # effective, after detection
+    input_type_pred: str
+    comparator: str
+    device: str                   # _cache_device(config)
+    de_backend: str               # resolved engine if de_backend_used, else config.de.backend
+    de_backend_used: bool         # selected DE with either side computed; controls de.engine
+    scoring_path: str             # "in_memory" here; "streaming" from score_cellstream
+    labels: tuple[str, ...]       # scored perturbations, control excluded, str, sorted()
+    # Match baseline._de_backend_used for replay identity (#412, design §8.2–§9).
+    de_real_computed: bool = True  # caller supplied no real DE; streaming computes it
 
 
 def _resolve_config(config: EvalConfig | None, overrides: dict) -> EvalConfig:
@@ -74,6 +97,13 @@ def _resolve_config(config: EvalConfig | None, overrides: dict) -> EvalConfig:
     cfg = replace(cfg, **overrides)
     if fmin is not None:
         cfg = replace(cfg, filter=replace(cfg.filter, filter_gene_min_cpm_cell=fmin))
+    # Design §11 (#412) retires DESeq2; removal was measured digest-neutral at 0ec6f692.
+    if cfg.de.backend == "deseq2":
+        warnings.warn(
+            "de.backend='deseq2' is deprecated: the DESeq2 backend will be removed in a later release",
+            FutureWarning,
+            stacklevel=2,
+        )
     return cfg
 
 
@@ -616,10 +646,11 @@ def _reject_cell_metrics(names, driver: str) -> None:
     """Raise if a raw-cell metric was requested on a driver that has no cells.
 
     Cell-kind metrics (the ``cell_cov_*`` family) need random row access to BOTH sides'
-    single cells. Only the in-memory ``compute_metrics`` path carries them; the streaming
-    (``scale.py``) and partitioned (``partition_inmem.py``) drivers hold pseudobulk / a
-    persisted real reference and no cells, so they fail loudly rather than silently drop
-    the metric -- mirroring ``_reject_moments_metrics``.
+    single cells. ``compute_metrics`` carries them, and ``score_cellstream`` scores them in a
+    separate pass after its partitioned loop, on the two archives directly. The streaming
+    (``scale.py``) drivers, the other partitioned drivers and the partitioned building blocks
+    (``partition_inmem.py``) hold pseudobulk / a persisted real reference and no cells, so they
+    fail loudly rather than silently drop the metric -- mirroring ``_reject_moments_metrics``.
     """
     blocked = sorted(n for n in names if n in CATALOG and CATALOG[n].kind == "cell")
     if blocked:
@@ -671,9 +702,10 @@ def _cell_row_source(adata):
 def _refuse_cell_metrics_up_front(cfg, *, driver: str):
     """Refuse cell metrics before a cell-less driver reads any input, and return ``cfg`` with a
     one-shot iterable selection frozen to a list -- the caller keeps it, so its own later
-    resolutions still see the selection. Every partitioned entry point and reference builder
-    calls this first: refusing only inside ``score_piece`` came after a whole real-reference
-    build, DE included (Copilot, #395)."""
+    resolutions still see the selection. ``score_h5ad_manifest``, ``score_rowstore`` and every
+    reference builder call this first: refusing only inside ``score_piece`` came after a whole
+    real-reference build, DE included (Copilot, #395). ``score_cellstream`` does not: it splits
+    the cell metrics off and scores them in a separate pass."""
     if not isinstance(cfg.metrics, (str, list, tuple)):
         cfg = replace(cfg, metrics=list(cfg.metrics))
     _reject_cell_metrics(resolve_metrics(cfg.metrics, version=cfg.version)[0], driver=driver)
@@ -1485,6 +1517,13 @@ def _write_de_tables(de_real, de_pred, *, cfg):
 # invalidates exactly those entries.
 _DE_RESULT_SEMANTICS = 2
 
+#: #414. Bump when the PR AUC clip changes meaning. A warm result cache can hold a perfect
+#: ranking's 1.0000000000000002 and serve it before the clipped metric runs, violating [0, 1].
+#: Scoped by `_pr_auc_used` so runs without PR AUC keep their existing result-cache key.
+#: This term belongs only to the result cache: PR AUC is not a vcc2026 member, and the clip
+#: changes neither the DE tables nor the frozen competition and anchor identities.
+_PR_AUC_CLIP_SEMANTICS = 1
+
 #: Bump when the MEANING of `pds_*` under `exclude_target_gene=True` changes. 3 = issue #343:
 #: the default `exclusion_scope` is "panel" -- EVERY panel target gene leaves the ranked feature
 #: space, where "row" dropped only the prediction row's own and left each reference
@@ -1740,6 +1779,25 @@ def _reach_floor_used(names) -> bool:
                for n in names if n in CATALOG)
 
 
+def _result_metric_versions(names) -> list:
+    """`[[name, version]]` for the selected metrics above version 1 -- the result-cache term
+    `baseline._baseline_policy_dict` mirrors for `config_digest` (#412, design §5.4). A DE
+    metric's two family siblings share their version, so the backend relabel cannot split it."""
+    return [[n, CATALOG[n].version] for n in names if n in CATALOG and CATALOG[n].version > 1]
+
+
+def _pr_auc_used(names) -> bool:
+    """Whether this run's result could depend on #414's PR AUC clip.
+
+    Keyed on FUNCTION IDENTITY like `_reach_floor_used`, so both `de_*_pr_auc` backend
+    families share one entry here. Every PR AUC run recomputes once: the key is built before
+    scores are known, so it cannot distinguish a rounded overshoot from an unchanged value.
+    Runs without PR AUC keep their warm cache.
+    """
+    return any(_func_is_one_of(CATALOG[n].func, (de_pr_auc,))
+               for n in names if n in CATALOG)
+
+
 def _discrimination_exclusion_used(cfg, names) -> bool:
     """Whether this run's result could depend on the #248 exclusion semantics.
 
@@ -1776,7 +1834,9 @@ def _no_target_gene_declared(cfg) -> bool:
 def _result_config_digest(
     cfg, *, de_backend_used: bool, comparator: str, pds_exclusion_used: bool = False,
     ontarget_exclusion_used: bool = False, reach_floor_used: bool = False,
+    pr_auc_clip_used: bool = False,
     no_drop_policy: list | None = None, cell_params: list | None = None,
+    metric_versions: list | None = None,
 ) -> str:
     """config_hash for the result cache key. The DEVICE always enters the key (via _cache_device:
     "auto" is resolved to cuda/cpu, an explicit device is used verbatim) -- fp32 GPU vs fp64 CPU
@@ -1872,6 +1932,17 @@ def _result_config_digest(
         # counter for a change no knob can see.
         d["cell_metric_params"] = cell_params
         d["cell_metric_semantics"] = _CELL_METRIC_SEMANTICS
+    if pr_auc_clip_used:
+        # #414. Scoped by the request like the terms above: a run selecting no `de_*_pr_auc`
+        # metric keeps its warm cache. A counter, not a value: the clip has no knob.
+        # See `_PR_AUC_CLIP_SEMANTICS`.
+        d["pr_auc_clip_semantics"] = _PR_AUC_CLIP_SEMANTICS
+    if metric_versions:
+        # #412, design §5.4's rule applied to the result cache (Copilot, #418): a selected
+        # metric's version bump means its values moved, so a warm cache must not serve the old
+        # frame under the new version. Absent while every selected version is 1, so no
+        # existing key moves; see `_result_metric_versions`.
+        d["metric_version"] = metric_versions
     return config_hash(d)
 
 
@@ -1940,15 +2011,31 @@ def _cell_archive_input_type(src, cfg) -> str:
         allow_discrete=cfg.allow_discrete, autodetect=True)
 
 
-def _run_cell_metrics_streaming(pred, real, cfg) -> pl.DataFrame:
+def _score_cell_metrics_on_sources(pred_src, real_src, cfg, names, *, effective_types,
+                                   driver) -> pl.DataFrame:
+    """Score the cell metrics in ``names`` on two open
+    :class:`~cell_eval2.cell_rowsource.CellStoreSource` handles, and return the tidy rows
+    (``_TIDY_SCHEMA``).
+
+    ``cfg`` carries the resolved ``pert_col`` and ``control``; ``effective_types`` is the
+    ``{'pred', 'real'}`` resolved input-type dict. The caller opens and closes both sources and
+    owns structural validation and type resolution; this writes no file.
+    """
+    rows = dispatch_cell_metrics(
+        names, pred_src, real_src, cfg, effective_types=effective_types,
+        genes=np.asarray(real_src.var_names, dtype=str), driver=driver)
+    return pl.DataFrame(rows, schema=_TIDY_SCHEMA) if rows else pl.DataFrame(schema=_TIDY_SCHEMA)
+
+
+def _run_cell_metrics_streaming(pred, real, cfg, *, on_resolved=None) -> pl.DataFrame:
     """Score an all-cell-metric selection on a cell-layout (``.shad``) pair WITHOUT materializing
     either side: open each as a streaming :class:`~cell_eval2.cell_rowsource.CellStoreSource` and
-    dispatch the cell metrics against it. Structural validation (gene axis, perturbation sets,
-    control) IS ``io.validate_pair``, on the archives' ``var`` and ``obs`` -- no payload decode,
-    and no requirement that an archive be STORED grouped by ``pert_col``: the cell metrics
-    gather rows by label, so an archive grouped by another column scores as its materialized
-    read does. Writes ``run_params.yaml`` like the in-memory tail; results.csv is written by the CLI
-    from the returned frame."""
+    dispatch the cell metrics against it through ``_score_cell_metrics_on_sources``. Structural
+    validation (gene axis, perturbation sets, control) IS ``io.validate_pair``, on the archives'
+    ``var`` and ``obs`` -- no payload decode, and no requirement that an archive be STORED grouped
+    by ``pert_col``: the cell metrics gather rows by label, so an archive grouped by another
+    column scores as its materialized read does. Writes ``run_params.yaml`` like the in-memory
+    tail; results.csv is written by the CLI from the returned frame."""
     import contextlib
 
     from .cell_rowsource import CellStoreSource
@@ -1978,12 +2065,29 @@ def _run_cell_metrics_streaming(pred, real, cfg) -> pl.DataFrame:
                    else cfg.input_type)
             for side, src in (("pred", pred_src), ("real", real_src))
         }
-        rows = dispatch_cell_metrics(
-            names, pred_src, real_src, cfg, effective_types=effective_types,
-            genes=np.asarray(real_src.var_names, dtype=str),
-            driver="compute_metrics (cellstream)")
+        if on_resolved is not None:
+            # #412 / design §8.3: report the open archives' resolved facts before scoring.
+            comparator = _norm.resolve_comparator(
+                version=cfg.version,
+                pred_input_type=effective_types["pred"],
+                real_input_type=effective_types["real"],
+            )
+            on_resolved(RunFacts(
+                config=cfg,
+                input_type_real=effective_types["real"],
+                input_type_pred=effective_types["pred"],
+                comparator=comparator,
+                device=_cache_device(cfg),
+                de_backend=cfg.de.backend,
+                de_backend_used=False,
+                scoring_path="in_memory",
+                labels=tuple(sorted(
+                    set(pred_src.obs[cfg.pert_col].to_numpy().astype(str)) - {cfg.control})),
+            ))
+        df = _score_cell_metrics_on_sources(pred_src, real_src, cfg, names,
+                                            effective_types=effective_types,
+                                            driver="compute_metrics (cellstream)")
 
-    df = pl.DataFrame(rows, schema=_TIDY_SCHEMA) if rows else pl.DataFrame(schema=_TIDY_SCHEMA)
     if cfg.outdir:
         os.makedirs(cfg.outdir, exist_ok=True)
         cfg.to_yaml(os.path.join(cfg.outdir, "run_params.yaml"))
@@ -2010,6 +2114,33 @@ def compute_metrics(
     is bound per-variant by functools.partial in the catalog; passing it here
     would silently override the partial.
     """
+    return _compute_metrics(pred, real, config=config, de_pred=de_pred, de_real=de_real,
+                            write_de=write_de, overrides=overrides, on_resolved=None)
+
+
+def _compute_metrics_with_facts(
+    pred, real, *, config: EvalConfig, de_pred=None, de_real=None, write_de: bool = False,
+    check_facts: Callable[[RunFacts], None] | None = None,
+) -> tuple[pl.DataFrame, RunFacts]:
+    """Expose the run's resolved settings for #412 / design §8.3, checking before scoring."""
+    facts: RunFacts | None = None
+
+    def on_resolved(resolved: RunFacts) -> None:
+        nonlocal facts
+        if check_facts is not None:
+            check_facts(resolved)
+        facts = resolved
+
+    df = _compute_metrics(pred, real, config=config, de_pred=de_pred, de_real=de_real,
+                          write_de=write_de, overrides={}, on_resolved=on_resolved)
+    if facts is None:
+        raise RuntimeError("metric run returned without producing RunFacts")
+    return df, facts
+
+
+def _compute_metrics(pred, real, *, config, de_pred, de_real, write_de, overrides,
+                     on_resolved):
+    """Shared execution keeps #412 / design §8.3 facts optional for ordinary callers."""
     cfg = _resolve_config(config, overrides)
     # A one-shot iterable selection is resolved more than once below (the cell-layout routing,
     # then the scorer it routes to), so freeze it into a list first (Copilot, #395).
@@ -2033,7 +2164,8 @@ def compute_metrics(
     # metric runs. Non-cell-layout inputs, or any selection that also includes a pseudobulk/DE
     # metric, fall through to the in-memory path below unchanged.
     if _cell_stream_eligible(pred, real, cfg):
-        return _run_cell_metrics_streaming(pred, real, _cell_archive_pert_col(pred, real, cfg))
+        return _run_cell_metrics_streaming(pred, real, _cell_archive_pert_col(pred, real, cfg),
+                                           on_resolved=on_resolved)
 
     real_store = CacheStore(cfg.cache_real) if cfg.cache_real else None
     pred_store = CacheStore(cfg.cache_pred) if cfg.cache_pred else None
@@ -2044,7 +2176,8 @@ def compute_metrics(
         real_ad = load_anndata(real, backed=isinstance(real, (str, os.PathLike)))
         try:
             return _run_metrics(pred_ad, real_ad, cfg=cfg, de_pred=de_pred, de_real=de_real,
-                                real_store=real_store, pred_store=pred_store, write_de=write_de)
+                                real_store=real_store, pred_store=pred_store, write_de=write_de,
+                                on_resolved=on_resolved)
         finally:
             # #277 item 3, HERE and not at the end of _run_metrics: that function returns EARLY on
             # a result-cache hit (run.py:1388), so logging inside it missed exactly the runs a
@@ -2059,8 +2192,8 @@ def compute_metrics(
 
 
 def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_store,
-                 write_de=False):
-    """Body of compute_metrics, split out so the backed file handles compute_metrics opened
+                 write_de=False, on_resolved=None):
+    """Body of _compute_metrics, split out so the backed file handles _compute_metrics opened
     are always closed (its try/finally) even if computation raises."""
     # Captured before de_pred/de_real are rebound (load below, compute later): a non-None table
     # here is SUPPLIED by the caller, so it must be fingerprinted strictly (F9.1, _de_supplied_strict).
@@ -2104,6 +2237,24 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
         pred_input_type=effective_types["pred"],
         real_input_type=effective_types["real"],
     )
+    if on_resolved is not None:
+        # #412 / design §8.3: capture before DE arguments are rebound and before the cache
+        # can return; a check may refuse these resolved settings before any metric runs.
+        de_backend_used = (any(CATALOG[n].kind == "de" for n in names)
+                           and (de_real is None or de_pred is None))
+        on_resolved(RunFacts(
+            config=cfg,
+            input_type_real=effective_types["real"],
+            input_type_pred=effective_types["pred"],
+            comparator=comparator,
+            device=_cache_device(cfg),
+            de_backend=_cache_backend(cfg) if de_backend_used else cfg.de.backend,
+            de_backend_used=de_backend_used,
+            de_real_computed=not de_real_supplied,
+            scoring_path="in_memory",
+            labels=tuple(sorted(
+                set(real_ad.obs[cfg.pert_col].to_numpy().astype(str)) - {cfg.control})),
+        ))
 
     # real_fp: needed for the real pseudobulk cache (real_store) or the result key (pred_store).
     # pred_fp: needed only when pred_store is set (pred pseudobulk cache or the result key) — so
@@ -2148,8 +2299,10 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
                 pds_exclusion_used=_discrimination_exclusion_used(cfg, names),
                 ontarget_exclusion_used=_ontarget_exclusion_used(names),
                 reach_floor_used=_reach_floor_used(names),
+                pr_auc_clip_used=_pr_auc_used(names),
                 no_drop_policy=_no_drop_policy(names, cfg.version, cfg.de.backend),
                 cell_params=_cell_metric_params(names),
+                metric_versions=_result_metric_versions(names),
             ),
             metric_names=names)
         cached = pred_store.get("results", fingerprint=result_fp, params={}, kind="parquet")

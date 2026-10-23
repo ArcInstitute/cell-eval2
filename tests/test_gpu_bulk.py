@@ -1,7 +1,12 @@
+import contextlib
+import logging
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
 
+from _cupy_like import INVALID_VALUE, CupyLike, DeviceArray, FakeCudaError
+from cell_eval2 import gpu
 from cell_eval2.gpu import resolve_device
 from cell_eval2.gpu.bulk import GroupedMeanAccumulator
 
@@ -436,3 +441,195 @@ def test_unweighted_site_never_bincounts_an_empty_index(cupy_like_bincount):
     acc = GroupedMeanAccumulator(3, 4, normalizations=["counts"], target_sum=1e6, device="cpu")
     acc._accumulate_block(sp.csr_matrix((0, 4), dtype=np.float32), np.zeros(0, dtype=np.intp))
     np.testing.assert_array_equal(_host(acc._counts), np.zeros(3))
+
+
+# --- #404: pinned H2D staging fails on a fragmented host; the copy falls back to pageable ---
+# Linux 6.11 pins N pages with one physically contiguous N*8-byte kernel allocation (mm/gup.c,
+# 53ba78de064b; removed again in 6.12 by 94efde1d1539). On a fragmented host that fails even
+# with plenty free, CUDA reports cudaErrorInvalidValue, and cupy re-raises anything but
+# cudaErrorMemoryAllocation (core.pyx:3072-3074). CPU CI drives the fallback with `CupyLike`.
+@pytest.fixture
+def pin_failures(monkeypatch):
+    """`gpu._to_device` treats `FakeCudaError(INVALID_VALUE)` as a pin failure; latch reset."""
+    monkeypatch.setattr(gpu, "_pin_failure_type", lambda: (FakeCudaError, INVALID_VALUE))
+    monkeypatch.setattr(gpu, "_pinned_h2d_failed_nbytes", None)
+
+
+def _pin_warnings(caplog):
+    return [r for r in caplog.records if r.name == "cell_eval2.gpu"]
+
+
+def test_to_device_is_numpy_asarray_on_cpu():
+    a = np.arange(6, dtype=np.float32)
+    assert gpu._to_device(np, a) is a                        # CPU path: no copy, no try
+
+
+@pytest.mark.parametrize("layout", ["C", "F", "strided", "strided_big_endian"])
+def test_to_device_falls_back_to_pageable_when_pinning_fails(pin_failures, caplog, layout):
+    base = np.arange(24, dtype=np.float32).reshape(4, 6)
+    a = {"C": base, "F": np.asfortranarray(base), "strided": base[:, ::2],
+         # neither C nor F, with F-like strides: cupy picks C from the input before its byte-order
+         # cast, and casting first would yield an F array
+         "strided_big_endian": np.arange(24, dtype=">f8").reshape(4, 6).T[::2]}[layout]
+    xp = CupyLike()
+    with caplog.at_level(logging.WARNING, logger="cell_eval2.gpu"):
+        out = gpu._to_device(xp, a)        # FakeStream fails it if the source dies before the wait
+    assert isinstance(out, DeviceArray)
+    assert out.dtype == a.dtype.newbyteorder("<") and out.shape == a.shape   # little-endian, as cupy
+    np.testing.assert_array_equal(out, a)
+    # cupy.asarray's order='K' rule (core.pyx:2961-2965): F only for an F-not-C source
+    assert out.flags.f_contiguous == (layout == "F")
+    assert out.flags.c_contiguous == (layout != "F")
+    assert xp.syncs == 1                                      # the copy finished before return
+    assert gpu._pinned_h2d_failed_nbytes == a.nbytes
+    assert len(_pin_warnings(caplog)) == 1
+    assert f"{a.nbytes:,}" in caplog.text and "cell_eval2#404" in caplog.text
+
+
+def test_to_device_latches_pageable_after_the_first_failure(pin_failures, caplog):
+    xp = CupyLike()
+    with caplog.at_level(logging.WARNING, logger="cell_eval2.gpu"):
+        gpu._to_device(xp, np.zeros(8, dtype=np.float32))
+        out = gpu._to_device(xp, np.arange(5, dtype=np.int32))
+    np.testing.assert_array_equal(out, np.arange(5, dtype=np.int32))
+    assert xp.asarray_calls == 1                 # the second copy never tried to pin
+    assert len(_pin_warnings(caplog)) == 1       # warned once per process
+    assert gpu._pinned_h2d_failed_nbytes == 32   # the size that failed, not the latest
+
+
+def test_to_device_converts_a_list_as_cupy_does(pin_failures):
+    out = gpu._to_device(CupyLike(), [3, 1, 2])                  # cupy.asarray takes lists too
+    assert out.dtype == np.asarray([3, 1, 2]).dtype
+    np.testing.assert_array_equal(out, [3, 1, 2])
+
+
+@pytest.mark.parametrize("status", [2, 700])   # cudaErrorMemoryAllocation, cudaErrorIllegalAddress
+def test_to_device_reraises_any_other_cuda_error(pin_failures, status):
+    with pytest.raises(FakeCudaError):
+        gpu._to_device(CupyLike(status=status), np.zeros(4, dtype=np.float32))
+    assert gpu._pinned_h2d_failed_nbytes is None
+
+
+def test_to_device_reraises_when_cupy_is_absent(monkeypatch):
+    monkeypatch.setattr(gpu, "_pin_failure_type", lambda: None)
+    monkeypatch.setattr(gpu, "_pinned_h2d_failed_nbytes", None)
+    with pytest.raises(FakeCudaError):
+        gpu._to_device(CupyLike(), np.zeros(4, dtype=np.float32))
+
+
+def test_to_device_propagates_a_failing_pageable_copy(pin_failures):
+    # An InvalidValue from the copy itself (a bad argument) recurs in the pageable copy. It must
+    # surface, never be swallowed into a silently wrong array. One from a call the retry does not
+    # repeat (cupy's pointer query, say) would be absorbed; `_to_device`'s docstring says so.
+    with pytest.raises(FakeCudaError):
+        gpu._to_device(CupyLike(broken_set=True), np.zeros(4, dtype=np.float32))
+
+
+def _accumulator_outputs(X, groups, norms, *, xp=None):
+    acc = GroupedMeanAccumulator(4, X.shape[1], normalizations=norms, target_sum=1e4,
+                                 device="cpu", with_moments=True)
+    if xp is not None:
+        acc._xp = xp      # every host->device copy now meets a pin that fails
+    acc.update(X, groups)
+    acc.jackknife(lambda: iter([(X, groups)]), per_gene=True)   # reaches the :341 site
+    fin = acc.finalize()
+    return ({n: fin[n][1] for n in norms}, acc.moments(), acc.jackknife_by_norm(),
+            acc.jackknife_gene_by_norm(), acc.max_row_total)
+
+
+def test_pageable_fallback_is_bit_identical_to_the_pinned_path_cpu(pin_failures, monkeypatch):
+    from cell_eval2.gpu import bulk
+    monkeypatch.setattr(bulk, "_PINNED_H2D_BUDGET_BYTES", 256)   # many sub-chunks, many copies
+    X = _rand_csr(11)
+    groups = np.random.default_rng(12).integers(0, 4, size=X.shape[0]).astype(np.intp)
+    norms = ["counts", "normalized", "lognorm", "bulk_lognorm"]
+
+    want = _accumulator_outputs(X, groups, norms)
+    xp = CupyLike()
+    got = _accumulator_outputs(X, groups, norms, xp=xp)
+
+    # One failed pin, then pageable. A site that bypassed _to_device would raise FakeCudaError.
+    assert xp.asarray_calls == 1
+    assert xp.syncs > 4
+    for n in norms:
+        np.testing.assert_array_equal(got[0][n], want[0][n])
+        for g_arr, w_arr in zip(got[1][n], want[1][n]):
+            np.testing.assert_array_equal(g_arr, w_arr)
+    np.testing.assert_array_equal(got[2]["bulk_lognorm"], want[2]["bulk_lognorm"])
+    np.testing.assert_array_equal(got[3]["bulk_lognorm"], want[3]["bulk_lognorm"])
+    assert got[4] == want[4]
+
+
+@contextlib.contextmanager
+def _pinned_alloc_fails():
+    """cupy's pinned allocator raises cudaErrorInvalidValue, as a fragmented 6.11 host does."""
+    import cupy
+    from cupy_backends.cuda.api import runtime
+
+    calls = []
+
+    def fail(size):
+        calls.append(size)
+        raise runtime.CUDARuntimeError(gpu._CUDA_ERROR_INVALID_VALUE)
+
+    cupy.cuda.set_pinned_memory_allocator(fail)
+    try:
+        yield calls
+    finally:
+        # what `import cupy` installs (cupy/__init__.py:907); cupy has no getter to restore from
+        cupy.cuda.set_pinned_memory_allocator(cupy.get_default_pinned_memory_pool().malloc)
+
+
+@pytest.mark.parametrize("device", [_cuda])
+def test_pinned_staging_failure_falls_back_on_cuda(device, monkeypatch, caplog):
+    import cupy
+    monkeypatch.setattr(gpu, "_pinned_h2d_failed_nbytes", None)
+    X = _rand_csr(21, n_cells=2000, n_genes=300)
+    groups = np.random.default_rng(22).integers(0, 4, size=X.shape[0]).astype(np.intp)
+    norms = ["counts", "normalized", "lognorm"]
+
+    def run():
+        acc = GroupedMeanAccumulator(4, X.shape[1], normalizations=norms, target_sum=1e4,
+                                     device=device)
+        acc.update(X, groups)
+        return acc.finalize(), acc.max_row_total
+
+    want, want_max = run()                                    # the ordinary pinned path
+    with _pinned_alloc_fails() as calls, \
+            caplog.at_level(logging.WARNING, logger="cell_eval2.gpu"):
+        got, got_max = run()
+    assert len(calls) == 1                                    # one pin attempt, then pageable
+    assert len(_pin_warnings(caplog)) == 1 and "cell_eval2#404" in caplog.text
+    np.testing.assert_array_equal(got["counts"][1], want["counts"][1])   # integer sums: exact
+    for n in ("normalized", "lognorm"):
+        # cupy's add.at scatters with fp64 atomics, whose order is not fixed between runs
+        np.testing.assert_allclose(got[n][1], want[n][1], rtol=1e-6, atol=0)
+    assert got_max == want_max
+    assert int(cupy.arange(10).sum()) == 45                   # the context still works
+
+
+@pytest.mark.parametrize("device", [_cuda])
+def test_cuda_invalid_value_from_cudahostalloc_is_not_sticky(device):
+    # #404 depends on cudaErrorInvalidValue from cudaHostAlloc leaving the context usable. Drive
+    # the REAL driver into that error (flags it does not define), check that `_to_device` would
+    # classify it as a pin failure, then do pinned staging, kernels and a CUB reduction.
+    import cupy
+    from cupy_backends.cuda.api import runtime
+    with pytest.raises(runtime.CUDARuntimeError) as err:
+        runtime.hostAlloc(1 << 20, 0xFFFFFFFF)
+    assert str(err.value).startswith("cudaErrorInvalidValue")   # the driver's own name for it
+    err_type, status = gpu._pin_failure_type()
+    assert isinstance(err.value, err_type) and err.value.status == status
+    n = 1 << 20
+    x = cupy.asarray(np.arange(n, dtype=np.int64))
+    assert int(x.sum()) == n * (n - 1) // 2 and int(x.max()) == n - 1
+
+
+def test_pinned_budget_is_a_power_of_two_at_most_256_mib():
+    # #404: cupy's pool rounds each pin up to a power of two, and on Linux 6.11 a pin of B bytes
+    # needs a B/512-byte page array. 256 MiB keeps that at 512 KiB (order 7), gpudge's slab size
+    # (gpudge_arc#159). A budget that is not a power of two would be rounded past itself.
+    from cell_eval2.gpu import bulk
+    budget = bulk._PINNED_H2D_BUDGET_BYTES
+    assert budget & (budget - 1) == 0
+    assert budget <= 1 << 28

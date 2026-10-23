@@ -8,6 +8,7 @@ import pytest
 
 from cell_eval2.cli import main
 from cell_eval2.config import EvalConfig
+from cell_eval2.run import RunFacts
 
 
 def test_cli_run_writes_results(synthetic_pair, tmp_path):
@@ -491,25 +492,35 @@ def test_cli_no_cache_strict_overrides_config(tmp_path, synthetic_pair, monkeypa
 
     def fake_compute(p, r, *, config, de_pred=None, de_real=None, **kw):
         seen["strict"] = config.cache_strict
-        return pl.DataFrame(schema={"perturbation": pl.Utf8, "metric": pl.Utf8, "value": pl.Float64})
+        frame = pl.DataFrame(schema={"perturbation": pl.Utf8, "metric": pl.Utf8, "value": pl.Float64})
+        facts = RunFacts(config=config, input_type_real=config.input_type,
+                         input_type_pred=config.input_type, comparator="bulk_lognorm",
+                         device="cpu", de_backend=config.de.backend, de_backend_used=False,
+                         scoring_path="in_memory", labels=("x",))
+        return frame, facts
 
-    monkeypatch.setattr(cli, "compute_metrics", fake_compute)
+    monkeypatch.setattr(cli, "_compute_metrics_with_facts", fake_compute)
     cli.main(["run", "-ap", str(pp), "-ar", str(rp), "--config", str(cfg_yaml),
               "--no-cache-strict", "-o", str(tmp_path / "o")])
     assert seen["strict"] is False  # explicit --no-cache-strict overrode config's true
 
 
 def _capture_cfg(monkeypatch, tmp_path, argv_extra):
-    """Run `cell-eval2 run` with compute_metrics stubbed; return the EvalConfig it built."""
+    """Run `cell-eval2 run` with _compute_metrics_with_facts stubbed; return the EvalConfig it built."""
     import cell_eval2.cli as cli
     seen = {}
 
     def fake_compute(p, r, *, config, de_pred=None, de_real=None, **kw):
         seen["cfg"] = config
-        return pl.DataFrame(schema={"perturbation": pl.Utf8, "metric": pl.Utf8, "value": pl.Float64})
+        frame = pl.DataFrame(schema={"perturbation": pl.Utf8, "metric": pl.Utf8, "value": pl.Float64})
+        facts = RunFacts(config=config, input_type_real=config.input_type,
+                         input_type_pred=config.input_type, comparator="bulk_lognorm",
+                         device="cpu", de_backend=config.de.backend, de_backend_used=False,
+                         scoring_path="in_memory", labels=("x",))
+        return frame, facts
 
     monkeypatch.setattr(cli, "build_run_meta", lambda *args, **kwargs: {})
-    monkeypatch.setattr(cli, "compute_metrics", fake_compute)
+    monkeypatch.setattr(cli, "_compute_metrics_with_facts", fake_compute)
     # This helper tests config parsing while its compute stub returns no rows. Selecting a
     # derived metric would correctly make aggregation raise, obscuring the config assertion.
     cli.main(["run", "-ap", "x.h5ad", "-ar", "y.h5ad", "--profile", "minimal",
@@ -1034,3 +1045,10 @@ def test_a_FAILED_anchor_cannot_leave_a_STALE_run_meta_beside_a_NEW_aggregate(
     )
     # The descriptor is absent, correctly: the anchor never completed.
     assert "anchor_cache" not in after
+
+
+def test_cli_input_type_help_reports_counts_default(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--help"])
+    assert exc.value.code == 0
+    assert "input matrix type (default: counts)" in capsys.readouterr().out

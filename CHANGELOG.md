@@ -4,6 +4,109 @@ All notable changes to cell_eval2. Releases before 0.0.4 (`v0.0.2`, `v0.0.3`) pr
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-23
+
+### Added
+
+- **`evaluation_results.json` on both scoring paths (#412).** `cell-eval2 run` writes it beside
+  `agg_results.csv` when scoring a prediction; `score_cellstream` writes it with `outdir`, staged
+  with the other outputs under `write_de=True`. It carries metric identities, headline statistics,
+  display text, resolved settings, statistics and per-perturbation values where applicable.
+  v1 and DESeq2 runs write no document.
+
+- **Replay from `evaluation_results.json` (#412).** `cell-eval2 run --settings-from` replays a
+  document's settings and checks its recorded facts; `cell_eval2.settings_to_config` and
+  `cell_eval2.facts_checker` provide the config and fact check for API replays. CLI flags or
+  `--set` may change only exempt settings: output, caches, threads and `allow_fractional_counts`.
+
+- **Per-metric versions and tolerance classes (#412).** Every metric starts at `version=1`.
+  With unchanged settings and inputs, a value change beyond the metric's recorded tolerance
+  requires a version bump: `exact` requires equal values; `continuous` allows
+  $|\Delta| \le 10^{-8} + 10^{-8}|\mathrm{ref}|$. Definition changes unexercised by fixtures,
+  or changes to the headline statistic, direction or axis (including its presence), also bump.
+
+- **`metrics_version` in `run_meta.json` (#412).** The suite-wide counter starts at 1 and bumps
+  when a metric is added, removed or changes version.
+
+- **Metric versions enter `config_digest` above 1 (#412).** The `metric_version` term contains
+  only selected metrics whose version exceeds 1; it is absent while all are at 1, preserving
+  existing digests in 0.20.0.
+
+- **`score_cellstream` scores cell metrics.** `cell_cov_ccc`, `cell_cov_corr` and
+  `cell_cov_eig_ratio` (`kind="cell"`) can now be selected next to the partitioned metrics, in a
+  selection the driver already accepts: no moments metric, and both `de_wilcoxon_nsig_counts_*`
+  metrics, from which it always reconstructs `de_wilcoxon_nsig_spearman`. They score in a separate
+  pass after the partitioned loop, reading the two `.shad` archives directly
+  through the code `compute_metrics` uses, and their rows are reduced like every other metric
+  (`agg="mean"`, NaN skipped). Every other metric's value is unchanged, and a call that selects
+  no cell metric runs exactly as before.
+  - Checks run before the reference builder, so their failures come before any DE work: both
+    sides must resolve to raw counts (else `ValueError`); with `cell_cov_ccc` selected on a CUDA
+    device and a `mem_budget` given, `mem_budget.gpu_bytes` must hold the upper end of its
+    documented peak-scratch range, `21·G²` bytes (else `ValueError`). Two of the pass's own
+    checks also run then, when some perturbation has at least 50 cells on both sides: with
+    `cell_cov_corr` or `cell_cov_eig_ratio` selected, the target-gene
+    resolution over the whole panel (the pass's own resolver call, so a construct-ID panel
+    without `target_gene_map` raises its `ValueError`); and the value check (next item) on the
+    predicted cells the pass would sample for the first such perturbation.
+  - The pass value-checks the cells it reads on both sides, including the predicted perturbed
+    cells, which the partitioned loop does not validate: negative values, NaN, non-integers, and
+    `max_counts_per_cell`. `allow_fractional_counts` relaxes the integer check on the predicted
+    side only. A failed check fails the call. The checks are skipped when `validate_input` is
+    off or the version is v1.
+  - The pass returns the CuPy pool's cached blocks and empties torch's CUDA cache, when
+    present, before it starts and again after it ends, also when it fails. Before it starts, it
+    also resets torch's peak-memory statistics on the current device, so a caller's own
+    `max_memory_allocated()` reading spans only what follows.
+  - The pass logs one INFO line on `cell_eval2.cellstream`, also when it fails:
+    `cell pass: metrics=… wall_s=… peak_torch_bytes=… peak_cupy_bytes=…`. The peaks are the
+    high-water marks over the pass; a value that cannot be measured is `-1`.
+  - A selection of cell metrics only is still refused with `NotImplementedError`: use
+    `compute_metrics`, which scores one on two `.shad` archives directly.
+  - `score_h5ad_manifest`, `score_rowstore`, the streaming drivers, and the `partition_inmem.py`
+    reference builders and `score_piece` still refuse cell metrics.
+
+### Changed
+
+- **`pr_auc` is clipped to [0, 1] (#414).** This removes floating-point overshoot on a perfect
+  prediction (about 2.2e-16); it is not a `vcc2026` member.
+
+### Deprecated
+
+- **The v1 presets** (`v1`, `legacy`, `cell-eval-0.7.6`, `cell_eval_0_7_6`) now emit
+  `FutureWarning` from `EvalConfig.from_preset` and will be removed in a later release.
+  `EvalConfig.version` stays.
+
+- **`de.backend="deseq2"`** now emits `FutureWarning` during scoring config resolution and
+  will be removed in a later release.
+
+### Fixed
+
+- **The `direction_fidelity_yield` range in the metrics reference (#414)** now reads
+  $[-q/d,\ (1-q)/d] \subseteq [-20, 1]$, matching the tight per-$q$ bound.
+
+- **The `--input-type` help text** now reports the actual default, `counts`.
+
+- **The `gpu` extra caps `nvidia-nvcomp-cu12` below 6.** nvCOMP 6.0.0 changed `Codec.decode` to
+  accept only an `Array` or `BatchArray`. cellstream 0.10.0 passes a list, so with nvCOMP 6.0.0 the
+  streaming GPU decode raised `TypeError: decode(): incompatible function arguments`. A fresh
+  `[gpu]` install now resolves nvCOMP 5.x and the streaming GPU decode works.
+
+- **A host-to-device copy that cupy cannot pin no longer fails the GPU pseudobulk (#404).**
+  `cupy.asarray` copies each host array through a pinned staging buffer. On Linux 6.11,
+  pinning needs one physically contiguous kernel allocation of 8 bytes per 4 KiB page (2 MiB
+  for the old 1 GiB transfer cap). On a host whose memory is fragmented that allocation fails, even
+  with hundreds of GB free, and CUDA reports `cudaErrorInvalidValue`. Six arcbench-nf scoring
+  runs on Lambda failed this way from 2026-10-09 to 2026-10-12. Such a copy now falls back to
+  pageable memory and logs one warning naming its size. Every later pseudobulk copy in the
+  process is pageable too, so the pin is not retried on a host that is still fragmented. The
+  kernels see the same array, so results are unchanged. Covers `GroupedMeanAccumulator.update`
+  and `.jackknife`; the copies of the GPU discrimination kernel and of `cell_cov_ccc` are not
+  covered. The cap on each pinned `update` transfer drops from 1 GiB to 256 MiB, so a pin needs a
+  512 KiB kernel allocation instead of 2 MiB and the fallback is needed less often. gpudge uses
+  the same slab size. On 6.11 a pin over 2 GiB always fails, which is the sharp cut-off reported
+  in #146.
+
 ## [0.19.0] — 2026-10-16
 
 ### Added

@@ -14,10 +14,43 @@ import pytest
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from cell_eval2 import partition_inmem
+from cell_eval2 import run
 from cell_eval2.config import EvalConfig
 from cell_eval2.de import prepare_de
 from cell_eval2.metrics.de import de_pr_auc, de_roc_auc
 from cell_eval2.run import dispatch_de_metrics
+
+
+def test_pr_auc_of_a_perfect_ranking_is_exactly_one():
+    """#414: sklearn's average precision sums recall steps in floating point and can land one
+    ULP above 1 on a perfect ranking; the metric is defined on [0, 1]."""
+    import polars as pl
+    from cell_eval2.de import prepare_de
+    from cell_eval2.metrics.de import de_pr_auc
+    k, n = 18, 20
+    genes = [f"g{i:02d}" for i in range(k + n)]
+    real = pl.DataFrame({"target": ["P"] * (k + n), "feature": genes,
+                         "log2_fold_change": [1.0] * (k + n),
+                         "p_adj": [1e-4] * k + [0.9] * n})
+    pred = real.with_columns(pl.Series(
+        "p_adj", [1e-12 * (i + 1) for i in range(k)] + [0.5 + 0.01 * i for i in range(n)]))
+    assert de_pr_auc(prepare_de(pred, real, control="non-targeting"))["P"] == 1.0
+
+
+def test_pr_auc_clip_is_scoped_to_pr_auc_metrics():
+    """#414: only PR AUC selections can serve an unclipped warm result."""
+    assert run._pr_auc_used(["de_wilcoxon_pr_auc"]) is True
+    assert run._pr_auc_used(["expr_mae", "de_wilcoxon_roc_auc"]) is False
+
+
+def test_pr_auc_clip_changes_only_the_opted_in_result_digest():
+    """#414: invalidate unclipped results while preserving every non-PR-AUC warm key."""
+    cfg = EvalConfig.v2()
+    kw = dict(de_backend_used=True, comparator="bulk_lognorm")
+    clipped = run._result_config_digest(cfg, **kw, pr_auc_clip_used=True)
+    unchanged = run._result_config_digest(cfg, **kw, pr_auc_clip_used=False)
+    assert clipped != unchanged
+    assert unchanged == run._result_config_digest(cfg, **kw)
 
 
 def _tables(pvalues, labels, target="P", dtype=pl.Float64):

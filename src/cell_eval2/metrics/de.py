@@ -878,7 +878,10 @@ def _de_auc(prepared: PreparedDE, method: str, *,
             out[pert] = float("nan")
             continue
         if method == "pr":
-            out[pert] = float(average_precision_score(labels, scores))
+            # #414: bound floating-point overshoot (at most 2.2e-16); not a vcc2026 member,
+            # and upstream cell-eval parity compares at rel_tol=1e-6.
+            ap = float(average_precision_score(labels, scores))
+            out[pert] = min(max(ap, 0.0), 1.0)
         else:
             fpr, tpr, _ = roc_curve(labels, scores)
             out[pert] = float(auc(fpr, tpr))

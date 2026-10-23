@@ -1,6 +1,6 @@
 [project]
 name = "cell-eval2"
-version = "0.19.0"
+version = "0.20.0"
 description = "Clean, streamlined, GPU-accelerated reimplementation of cell-eval"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -50,19 +50,15 @@ scale = [
 ]
 # nvidia-nvcomp-cu12: cellstream's GPU .shad decode (read_v2_subset_to_device) needs nvCOMP in
 # addition to cupy; without it the scale/streaming GPU tests fail at import instead of running.
-# ⚠️ DELIBERATELY UNPINNED, while `cellstream[gpu]` pins `nvidia-nvcomp-cu12>=4,<5`. We resolve
-# 5.3.0.16 and nothing enforces cellstream's cap, because `scale` takes BARE `cellstream` and this
-# extra supplies the GPU half, so the two never resolve together. That is a real, unenforced
-# divergence -- so it was MEASURED rather than assumed, on an H100 (driver 12.6, cupy 14.1.1,
-# nvcomp 5.3.0.16, cellstream 0.9.0):
-#   * the 254 tests in the 18 cellstream-gated modules: 254 passed, 0 failed, 0 skipped;
-#   * a real schema-3 `.shad` written with `write_sharded` and decoded through the GPU path
-#     (`ShardedArchive.to_cupy_anndata`, which is what routes to nvCOMP) returned a total
-#     IDENTICAL to the CPU decode -- 71888.0 both ways, bit for bit.
-# So v5 works for the paths we use, and adopting `>=4,<5` would downgrade a verified stack to
-# satisfy an upstream cap that is conservative for our case. If a future cellstream DOES break on
-# v5, this comment is the note to read: the bound is not enforced, so nothing will warn you.
-gpu = ["cupy-cuda12x", "nvidia-nvcomp-cu12"]
+# ⚠️ Capped below 6. nvCOMP 6.0.0 changed `Codec.decode` to accept only an `Array` or `BatchArray`;
+# cellstream 0.10.0 (`v2/reader_gpu.py:262`) passes a list, so the streaming GPU decode raises
+# `TypeError: decode(): incompatible function arguments`.
+# cellstream's own `cellstream[gpu]` cap (`>=4,<5`) is not enforced and not adopted here: `scale`
+# takes BARE `cellstream` and this extra supplies the GPU half, so the two never resolve together.
+# Measured on an H100 (driver 12.6, cupy 14.1.1, nvcomp 5.3.0.16, cellstream 0.9.0): the 254 tests
+# in the 18 cellstream-gated modules passed, and a real schema-3 `.shad` decoded through the GPU
+# path (`ShardedArchive.to_cupy_anndata`) matched the CPU decode bit for bit.
+gpu = ["cupy-cuda12x", "nvidia-nvcomp-cu12<6"]
 # gpudge is the GPU DE engine that `de.backend="auto"` selects when a CUDA device is visible, and
 # it drives four of the six scored `vcc2026` members. It is its OWN extra rather than part of
 # `gpu` on purpose: `gpu` is cupy + nvCOMP for the pseudobulk/rank kernels, while gpudge pulls
@@ -100,6 +96,9 @@ dev = [
     # pass the exception class explicitly, so a tool that exists and raises anything OTHER than
     # ModuleNotFoundError fails loudly instead of skipping (pytest 8.x skips on any ImportError).
     "pytest>=8.2",
+    # The §14 schema tests only; the writer checks the data rules itself, so this is
+    # never a runtime dependency (#412, design §4).
+    "jsonschema>=4.18",
     # PINNED, not `>=`: CI installs this group fresh, so an unpinned linter turns `main` red
     # on ruff's release schedule with no code change -- which is what happened between #379
     # merging and #380 (0.16.4 flags 28 E70x/E731 in tools/gene_qc that 0.16.2 did not), and

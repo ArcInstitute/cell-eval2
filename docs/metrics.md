@@ -322,6 +322,18 @@ Let $S_p = \lbrace g : p^{\mathrm{adj}}_{p,g} \lt T \rbrace$ denote the signific
 
 ### 1.5 Versions, direction, and degenerate handling
 
+- **Metric versions (0.20.0, #412).** A metric's identity is (suite, key, version); every metric
+  starts at version 1. With unchanged settings and inputs, any value change beyond its tolerance
+  requires a bump, whatever the cause. `continuous` allows
+  $|\Delta| \le 10^{-8} + 10^{-8}|\mathrm{ref}|$ for `expr_*`, `delta_*`, `cell_*` and
+  `de_*_lfc_nmae`, `de_*_pr_auc`, `de_*_roc_auc`; `exact` requires equal values for all others
+  (paired NaNs compare equal). The class is recorded per metric, not inferred from its family.
+  Fixtures can prove a bump is needed, never that none is: a definition change they do not
+  exercise still bumps. Changes to `headline.statistic`, `headline.direction` or `axis`
+  (its name or presence) bump regardless of values. The suite-wide `metrics_version` counter
+  starts at 1 in `run_meta.json` and bumps when a metric is added, removed or changes version.
+  `config_digest` includes a `metric_version` term only for selected metrics above version 1;
+  with every version at 1, existing digests are unchanged.
 - **v1 vs v2.** Every metric has a canonical **v2** name and, where an upstream `cell-eval`
   equivalent exists, a **v1** alias (used both as an accepted input spelling and as the v1
   output label). v1 reproduces upstream conventions (median `target_sum`, geometric LFC,
@@ -2727,7 +2739,7 @@ Profiles: **v**=vcc, **2026**=vcc2026, **m**=minimal, **f**=full, **a**=anndata,
 | `de_wilcoxon_direction_coverage` | — | $[0,\infty)$ | ↑ | | ✓ | — | — | f d |
 | `de_wilcoxon_direction_yield` | — | unbounded both ways | ↑ | | ✓ | — | — | f d |
 | `de_wilcoxon_direction_yield_raw` | — | $[0,\infty)$ | ↑ | | ✓ | — | — | f d |
-| `de_wilcoxon_direction_fidelity_yield` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d |
+| `de_wilcoxon_direction_fidelity_yield` | — | $[-q/d,\ (1-q)/d] \subseteq [-20, 1]$ | ↑ | $1$ | ✓ | — | — | f d |
 | `de_wilcoxon_direction_fidelity_yield_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d 2026 |
 | `de_wilcoxon_direction_reach` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d |
 | `de_wilcoxon_direction_reach_raw` | — | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f d 2026 |
@@ -2761,15 +2773,32 @@ the disconnect #386 opens with, in Chris Carpenter's words: "we predict a full c
 matrix, for each perturbation, but in cell_eval2, the first thing we do is take the sum."
 
 The `cell` profile is the opt-in family that measures what the reduction discards. It is
-`kind="cell"`: both sides' raw single cells, with random row access, served **only** by the
-in-memory `compute_metrics` driver. (When every selected metric is a cell metric and both inputs
-are cell-layout `.shad` paths, `compute_metrics` reads straight from the archives instead of
+`kind="cell"`: both sides' raw single cells, with random row access. Two drivers serve them.
+
+The in-memory `compute_metrics` scores them. When every selected metric is a cell metric and both
+inputs are cell-layout `.shad` paths, it reads straight from the archives instead of
 materializing either side: `cell_cov_ccc` reads only the cells it samples, while
 `cell_cov_corr` and `cell_cov_eig_ratio` also stream, in chunks, every real cell of each
-perturbation and of the control to pick their responding genes.) The streaming (`scale.py`) and partitioned
-(`partition_inmem.py`) drivers carry pseudobulk and no cells, so they refuse these metrics up
-front (`_reject_cell_metrics`) rather than silently dropping them. Select them with
+perturbation and of the control to pick their responding genes. Select them with
 `--profile cell`, or by name.
+
+`score_cellstream` scores them in a separate pass after its partitioned loop, through the same
+archive reader. Select them by name next to a selection that driver supports: no moments metric,
+and both `de_wilcoxon_nsig_counts_real` and `de_wilcoxon_nsig_counts_pred`, from which it always
+reconstructs `de_wilcoxon_nsig_spearman` (without them a call fails after the DE run, cell
+metric or not). A cell-only selection, `metrics="cell"` included, is refused there. Before any DE
+runs it checks that both sides resolve
+to raw counts and, for `cell_cov_ccc` on a CUDA device, that `mem_budget.gpu_bytes` holds
+`21·G²` bytes, the upper end of the §8.3 peak-scratch range. When some perturbation has at least
+$50$ cells at the common depth, it also runs two of the pass's own checks: for `cell_cov_corr`
+and `cell_cov_eig_ratio`, the target-gene resolution over the whole panel (§8.1, the pass's own
+resolver call); and the value check (§8.1) on the predicted cells the pass would sample for the
+first such perturbation. Under §8.1's conditions the pass still checks every block it reads.
+
+The streaming (`scale.py`) drivers, the other partitioned drivers (`score_h5ad_manifest`,
+`score_rowstore`) and the `partition_inmem.py` reference builders and `score_piece` carry
+pseudobulk and no cells, so they refuse these metrics up front (`_reject_cell_metrics`) rather
+than silently dropping them; `score_cellstream` hands its builders the selection without them.
 
 **Everything in this section is unscored (`DIAG`) and reaches no shipped profile**, so
 `rule_version`, `competition_digest()` and every `avg_score` are untouched. That is the §6a
@@ -2789,10 +2818,12 @@ the three official validation contexts are what an enrolment discussion starts f
 
 Input must be **counts**: a `lognorm` pair is refused with a clear error, never `expm1`'d
 back, because a per-cell library size cannot be recovered from an already-normalized matrix.
-With `validate_input` on, every block of cells these metrics read passes the same checks the
-in-memory path runs on a whole matrix (negative values, fractional counts outside
-`allow_fractional_counts`, `max_counts_per_cell`) — on the archive path the only validation
-those cells get.
+With `validate_input` on and a version other than v1, every block of cells these metrics read
+passes the same checks the in-memory path runs on a whole matrix (negative values, fractional
+counts outside `allow_fractional_counts`, `max_counts_per_cell`) — on `compute_metrics`' archive
+path the only validation those cells get, and on `score_cellstream` the only one its predicted
+perturbed cells get (the check also runs before any DE runs, on the cells the pass would sample
+for the first perturbation with at least $50$ cells at the common depth).
 
 ### 8.2 `cell_cov_corr`, `cell_cov_eig_ratio` — responding-gene covariance (B4)
 

@@ -20,17 +20,21 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import resolve_device, xp_for
+from . import _to_device, resolve_device, xp_for
 from ..moments import DEFAULT_BULK_TARGET_SUM
 
 _ALLOWED = ("counts", "normalized", "lognorm", "bulk_lognorm")
 
-# cupy 14.1.1 fails any single pinned (page-locked) host allocation > 2 GiB (2**31 B) with
-# cudaErrorInvalidValue (issue #133). ``update`` pins each block's ``Xr.data`` AND ``Xr.indices``
-# per H2D transfer, so a block whose ``nnz * itemsize`` exceeds that ceiling crashes. We cap the
-# pinned footprint per transfer by sub-chunking a block's rows; the grouped-mean accumulation is
-# row-additive, so contiguous-row sub-chunks are arithmetically exact.
-_PINNED_H2D_BUDGET_BYTES = 1 << 30  # 1 GiB, comfortably under the 2 GiB ceiling
+# Each `update` H2D transfer of ``Xr.data`` / ``Xr.indices`` is staged through a pinned
+# (page-locked) host buffer, which cupy's pool rounds up to a power of two. On Linux 6.11 pinning
+# B bytes needs one physically contiguous B/512-byte kernel allocation: a pin over 2 GiB always
+# fails (order 11, past the kmalloc limit; issue #133), and a large one under it fails on a
+# fragmented host (#404). We cap the pinned footprint per transfer by sub-chunking a block's rows;
+# the grouped-mean accumulation is row-additive, so contiguous-row sub-chunks are arithmetically
+# exact. 256 MiB keeps each pin at an order-7 (512 KiB) allocation, gpudge's slab size for the
+# same reason (gpudge_arc#159); keep it a power of two. A pin can still fail; `gpu._to_device`
+# then copies through pageable memory (#404).
+_PINNED_H2D_BUDGET_BYTES = 1 << 28  # 256 MiB
 
 
 def _add_at(xp, dst, idx, val):
@@ -140,7 +144,7 @@ class GroupedMeanAccumulator:
         """Accumulate a block: ``x_csr`` [n_cells, n_genes] CSR, ``group_idx`` [n_cells] in [0, n_groups).
 
         Sub-chunks the block's rows so no single pinned H2D transfer exceeds
-        ``_PINNED_H2D_BUDGET_BYTES`` (cupy's 2 GiB single-alloc ceiling, issue #133). The
+        ``_PINNED_H2D_BUDGET_BYTES`` (pin limits on Linux 6.11, issues #133 and #404). The
         grouped-mean accumulation is row-additive, so contiguous-row sub-chunks are exact.
         """
         Xr = x_csr.tocsr()
@@ -187,7 +191,7 @@ class GroupedMeanAccumulator:
         xp = self._xp
         Xr = x_csr
         n_cells = Xr.shape[0]
-        group = xp.asarray(group_idx).astype(xp.intp)  # cast on device (cheaper than host-side)
+        group = _to_device(xp, group_idx).astype(xp.intp)  # cast on device (cheaper than host-side)
 
         # per-cell counts (every cell, regardless of nonzeros). `_bincount` (not `xp.bincount`)
         # because cupy raises on an empty `group` -- a zero-CELL block. `_row_chunks` guarantees
@@ -198,9 +202,9 @@ class GroupedMeanAccumulator:
 
         # Transfer in native precision (fp32 data, int32 indices) then cast on device: halves
         # the PCIe volume and offloads the cast. fp32->fp64 and int32->int64 are exact.
-        data = xp.asarray(Xr.data).astype(xp.float64)
-        indices = xp.asarray(Xr.indices).astype(xp.intp)
-        indptr = xp.asarray(Xr.indptr).astype(xp.intp)
+        data = _to_device(xp, Xr.data).astype(xp.float64)
+        indices = _to_device(xp, Xr.indices).astype(xp.intp)
+        indptr = _to_device(xp, Xr.indptr).astype(xp.intp)
         # destination group for each nonzero (shared by every normalization's scatter)
         row_of_nnz = xp.repeat(xp.arange(n_cells), xp.diff(indptr))
         grp_of_nnz = group[row_of_nnz]
@@ -338,7 +342,7 @@ class GroupedMeanAccumulator:
                 rows = np.flatnonzero(codes == g)
                 for s in range(0, rows.size, chunk):
                     blk = Xd[rows[s:s + chunk]]
-                    Y = xp.asarray(blk.toarray()).astype(xp.float64)
+                    Y = _to_device(xp, blk.toarray()).astype(xp.float64)
                     lib = Y.sum(axis=1)
                     V = _loo_bulk(sums[g], Y, totals[g] - lib,
                                   self.bulk_target_sum, xp=xp)

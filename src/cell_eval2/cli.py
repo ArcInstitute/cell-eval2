@@ -13,9 +13,13 @@ import yaml
 from .baseline import _degenerate_metrics, build_run_meta, write_json_meta
 from .ceiling import compute_ceiling
 from .config import NO_TARGET_GENE_WILDCARD, EvalConfig
-from .run import (_cell_archive_pert_col, aggregate_metrics_wide, compute_metrics, metric_agg,
-                  metric_cohorts, metric_output_names, precompute_cache)
+from .evaluation_results import (FILENAME, build_document, load_document, no_document_reason,
+                                 remove_stale_document, write_document)
+from .run import (_cell_archive_pert_col, _compute_metrics_with_facts, aggregate_metrics_wide,
+                  metric_agg, metric_cohorts, metric_output_names, precompute_cache)
 from .score import score_metrics
+from .settings import (SettingsMismatch, changed_fields, check_recordable, facts_checker,
+                       settings_to_config)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,7 @@ def _add_config_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--pert-col", default=None, help="perturbation column (default: target)")
     p.add_argument("--control", default=None, help="control label (default: non-targeting)")
     p.add_argument("--input-type", default=None, choices=["counts", "lognorm"],
-                   help="input matrix type (default: lognorm)")
+                   help="input matrix type (default: counts)")
     p.add_argument("--version", default=None, choices=["v1", "v2"],
                    help="metric-name version for output labels (default: v2)")
     p.add_argument("--cache-real", default=None, help="cache folder for real-side artifacts")
@@ -101,14 +105,16 @@ def _apply_set_overrides(cfg: EvalConfig, overrides: list[str]) -> EvalConfig:
         raise SystemExit(f"--set: invalid config value: {e}") from None
 
 
-def _build_cfg(args) -> EvalConfig:
+def _build_cfg(args, *, base: EvalConfig | None = None) -> EvalConfig:
     cli_overrides = {field: getattr(args, flag)
                      for flag, field in _FLAG_TO_FIELD.items()
                      if hasattr(args, flag) and getattr(args, flag) is not None}
-    if getattr(args, "preset", None) and args.config:
+    if base is None and getattr(args, "preset", None) and args.config:
         raise SystemExit("--preset and --config are both config BASES; pass one. To adjust a "
                          "preset, use explicit flags or --set, which override it.")
-    if getattr(args, "preset", None):
+    if base is not None:
+        cfg = base
+    elif getattr(args, "preset", None):
         try:
             cfg = EvalConfig.from_preset(args.preset)
         except ValueError as e:
@@ -319,6 +325,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           "real-data estimates. That mode writes only their outputs, no "
                           "results.csv")
     run.add_argument("-ar", "--adata-real", required=True)
+    run.add_argument("--settings-from", default=None, metavar="PATH",
+                     help="replay settings and metrics from evaluation_results.json; "
+                          "mutually exclusive with --config and --preset")
     run.add_argument("--de-pred", default=None,
                      help="DE table (CSV/parquet) for the predicted side")
     run.add_argument("--de-real", default=None,
@@ -504,7 +513,27 @@ def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
 
     if args.command == "run":
-        cfg = _build_cfg(args)
+        replay_doc = None
+        if args.settings_from is not None:
+            # Refuse uncheckable modes and changed identity before any scorer runs
+            # (#412, design §9; settings.changed_fields and settings.facts_checker).
+            if args.config is not None or args.preset is not None:
+                raise SystemExit("--settings-from, --config and --preset are mutually exclusive")
+            if args.profile is not None:
+                raise SystemExit("--settings-from refuses --profile: metrics come from the document")
+            if args.adata_pred is None:
+                raise SystemExit("--settings-from requires -ap/--adata-pred to check resolved facts")
+            try:
+                replay_doc = load_document(args.settings_from)
+                base = settings_to_config(replay_doc)
+            except (ValueError, OSError) as e:   # OSError: a missing or unreadable file (Gemini)
+                raise SystemExit(f"--settings-from: {e}") from None
+            cfg = _build_cfg(args, base=base)
+            changes = changed_fields(base, cfg)
+            if changes:
+                raise SystemExit("--settings-from: overrides change " + ", ".join(changes))
+        else:
+            cfg = _build_cfg(args)
         if cfg.outdir is None:
             cfg = replace(cfg, outdir="./cell-eval2-outdir")  # CLI always needs a write target
         # Ceiling-only mode: the ceiling is estimated from the real data alone, so no
@@ -569,6 +598,14 @@ def main(argv: list[str] | None = None) -> None:
                                "tables it writes are the main (pred, real) scoring's, which "
                                "is skipped here.")
         if not ceiling_only:
+            reason = no_document_reason(cfg)
+            if reason is None:
+                # Refuse settings JSON cannot preserve before input reads or scoring
+                # (#412, design §8.2; settings.check_recordable).
+                try:
+                    check_recordable(cfg)
+                except ValueError as e:
+                    raise SystemExit(str(e)) from None
             # BUILT before the metrics (backed reads only -- see build_run_meta), so a bad
             # config fails before the expensive work. run_meta.json mirrors the baseline
             # stamp's RESOLVED identity -- without it `score` has nothing on the user side to
@@ -578,15 +615,33 @@ def main(argv: list[str] | None = None) -> None:
             cfg = _cell_archive_pert_col(args.adata_pred, args.adata_real, cfg)
             run_meta = build_run_meta(cfg, args.adata_real, args.adata_pred,
                                       de_real=args.de_real, de_pred=args.de_pred)
-            df = compute_metrics(args.adata_pred, args.adata_real, config=cfg,
-                                 de_pred=args.de_pred, de_real=args.de_real,
-                                 write_de=args.write_degenes)
             os.makedirs(cfg.outdir, exist_ok=True)
+            # Remove an earlier run's document first so no compute failure leaves a
+            # wrong one: _compute_metrics_with_facts writes run_params.yaml and DE
+            # tables itself (#412, design §6.6).
+            removed = remove_stale_document(cfg.outdir)
+            if reason:
+                logger.warning("%s%s", reason,
+                               "; removed an earlier document" if removed else "")
+            try:
+                df, facts = _compute_metrics_with_facts(
+                    args.adata_pred, args.adata_real, config=cfg,
+                    de_pred=args.de_pred, de_real=args.de_real,
+                    write_de=args.write_degenes,
+                    check_facts=facts_checker(replay_doc) if replay_doc is not None else None)
+            except SettingsMismatch as e:
+                if replay_doc is None:
+                    raise
+                raise SystemExit(f"--settings-from: {e}") from None
             out_path = os.path.join(cfg.outdir, "results.csv")
             df.write_csv(out_path)
             # Same EXPECTED name list the baseline uses, so score_metrics' ordered column
             # comparison matches by construction rather than by luck.
-            wide = aggregate_metrics_wide(df, metrics=metric_output_names(cfg))
+            expected = metric_output_names(cfg)
+            wide = aggregate_metrics_wide(df, metrics=expected)
+            # Build before agg_results.csv so a refusal leaves the previous aggregate
+            # and meta together (#412, design §2.1; build_document validates too).
+            doc = None if reason else build_document(df, facts, metrics=expected)
             wide.write_csv(os.path.join(cfg.outdir, "agg_results.csv"))
             # Sidecar so a consumer of agg_results.csv alone can tell which statistic each
             # column holds: the wide frame's row is named "mean" for every metric, but it
@@ -627,6 +682,10 @@ def main(argv: list[str] | None = None) -> None:
             # would certify an aggregate the metadata does not describe. So: write it here,
             # matching what has been produced so far, and rewrite it after the anchor.
             write_json_meta(run_meta, os.path.join(cfg.outdir, "run_meta.json"))
+            # Write last, after the aggregate, sidecar and metadata it accompanies
+            # (#412, design §2.1; write_document).
+            if doc is not None:
+                write_document(doc, os.path.join(cfg.outdir, FILENAME))
             print(out_path)
         # BEFORE the rewrite below: the anchor block mutates `run_meta` with the cache
         # descriptor, and `run_meta.json` is written at the end of the `not ceiling_only`

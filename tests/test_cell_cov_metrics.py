@@ -1392,11 +1392,9 @@ def test_the_global_stats_pass_is_chunked_by_bytes(panels, monkeypatch):
 
 
 def test_the_reference_builders_refuse_cell_metrics_before_reading(monkeypatch, tmp_path):
-    """`score_cellstream`, `score_h5ad_manifest` and `score_rowstore` build the real reference --
-    its real-side DE included -- before `score_piece` runs, so a cell metric was refused only
-    after that whole pass (Copilot, #395). The builders now refuse first. `_resolve_backend` is
-    forced to 'gpudge' so the partition-config check passes without a CUDA device, as in
-    tests/test_ground_truth_cache_streaming.py."""
+    """The reference builders refuse a cell metric before reading their source, ahead of the
+    real-side DE (#395). `_resolve_backend` is forced to 'gpudge' so the partition-config check
+    passes without a CUDA device, as in tests/test_ground_truth_cache_streaming.py."""
     import cell_eval2.de_compute as de_compute
     import cell_eval2.partition_inmem as pim
 
@@ -1420,10 +1418,10 @@ def test_the_reference_builders_refuse_cell_metrics_before_reading(monkeypatch, 
 
 
 def test_the_partitioned_scorers_refuse_cell_metrics_before_reading(monkeypatch, tmp_path):
-    """`score_cellstream`, `score_h5ad_manifest` and `score_rowstore` sampled, peeked at or (with
-    target_sum=None) materialized their inputs before the reference builders refused a cell
-    metric (Codex, #395). Each now refuses at its own boundary: the inputs here do not exist, so
-    any read would raise something else first."""
+    """Each partitioned scorer refuses before any read (the inputs do not exist). `score_cellstream`
+    refuses only a selection of cell metrics alone; a mixed one, a one-shot iterable included,
+    gets through to the first archive open (#395)."""
+    import cell_eval2.cellstream as cs
     import cell_eval2.de_compute as de_compute
     import cell_eval2.partition_inmem as pim
     from cell_eval2.cellstream import score_cellstream
@@ -1432,11 +1430,22 @@ def test_the_partitioned_scorers_refuse_cell_metrics_before_reading(monkeypatch,
 
     monkeypatch.setattr(pim, "_resolve_backend", lambda backend: "gpudge")
     monkeypatch.setattr(de_compute, "_resolve_backend", lambda backend: "gpudge")
+
+    class _Opened(Exception):
+        pass
+
+    def _open(path):
+        raise _Opened(path)
+
+    monkeypatch.setattr(cs, "open_cell_store", _open)
     missing = str(tmp_path / "does-not-exist")
-    for selection in (["cell_cov_ccc"], iter(["cell_cov_ccc", "expr_mae"])):
+    for selection in (["cell_cov_ccc"], iter(["cell_cov_ccc"])):
         cfg = EvalConfig(metrics=selection, device="cpu", target_sum=None)
-        with pytest.raises(NotImplementedError, match="raw single cells"):
+        with pytest.raises(NotImplementedError, match="compute_metrics"):
             score_cellstream(missing, missing, config=cfg, mem_budget=None)
+    cfg = EvalConfig(metrics=iter(["cell_cov_ccc", "expr_mae"]), device="cpu", target_sum=None)
+    with pytest.raises(_Opened):
+        score_cellstream(missing, missing, config=cfg, mem_budget=None)
     for scorer in (score_h5ad_manifest, score_rowstore):
         with pytest.raises(NotImplementedError, match="raw single cells"):
             scorer(missing, config=EvalConfig(metrics=["cell_cov_ccc"], device="cpu",
