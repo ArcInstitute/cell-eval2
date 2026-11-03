@@ -69,7 +69,7 @@ is a **dispersion functional**, not a mean: by Jensen's inequality it sits below
 the mean, by an amount set by how variable the cells are. Two submissions reporting the same
 biology through differently dispersed cells land in different places, and no zero-dispersion
 prediction can reproduce a real profile at all (#258, #260). Issue #264 replaces the space
-the **13 anndata metrics** are compared in — every `expr_*`, `pds_*` and `delta_*` — with a
+the **anndata metrics** are compared in — every `expr_*`, `pds_*` and `delta_*` — with a
 **group-sum** bulk:
 
 ```math
@@ -782,6 +782,45 @@ $\Rightarrow \hat{\delta}_p \equiv 0$) scores the worst value $-1$ (issue #92) �
 since #391, because for a two-gene input some scipy versions return $0$ rather than NaN — while a
 constant or non-finite *reference* delta is not scored (NaN, issue #391) — unreachable on real
 pseudobulk. v1 emits NaN for both.
+
+---
+
+### 2.6 `delta_pearson_degs` (v2 only, opt-in)
+
+Pearson correlation between the predicted and real perturbation-control deltas,
+restricted to **reference-significant genes**, excluding each perturbation's own target
+(via `target_gene_map`, with the same gene-identity checks as PDS). Selection uses
+`de.p_adj_threshold`, `de.min_abs_log2fc` and `de.nan_lfc_policy`, as the DE metrics do
+(§1.4); predicted significance never selects genes. Genes absent from the measured expression
+panel do not enter the correlation, and a reference table none of whose features is a measured
+gene raises rather than scoring nothing.
+
+The expression space and `control_source` are identical to `delta_pearson`: counts/counts
+uses `bulk_lognorm`; already log-normalized inputs use mean cell log-expression.
+With `control_source=pred`, each side subtracts its own control mean. Gene selection
+always uses real cells versus real controls, regardless of `control_source`.
+
+Range **[-1, 1]**, higher is better; aggregate is the mean across scoreable perturbations.
+Fewer than **10** selected genes (`real_gate.DEFAULT_MIN_GATE_SIZE`, the floor of the gated
+metrics, §1.5), or a constant/nonfinite reference delta, gives NaN and is excluded from the
+aggregate: over 2 genes a correlation is $\pm 1$ whatever the prediction. A constant/nonfinite
+predicted delta on a scoreable reference is charged **-1**. Even at 10 genes the correlation is
+noisy (null SD $1/3$), so report the number of scoreable perturbations when comparing models.
+
+```bash
+cell-eval2 run -ap pred.h5ad -ar real.h5ad -o scores \
+  --set 'metrics=["delta_pearson_degs"]' --set control_source=pred
+```
+
+For precomputed reference catalogs, the Python API accepts a standard DE table via
+`compute_metrics(pred, real, de_real=table, config=cfg)`. Required columns are
+`target`, `feature`, `p_adj`, and `log2_fold_change`. Supply all evaluated perturbations,
+including nonsignificant rows for conditions without DEGs; a missing condition is an error.
+In-memory scoring computes only real DE when no DE-comparison metric is selected.
+`score_cellstream`, `score_h5ad_manifest`, `score_rowstore` and `score_streaming_cell` reuse
+the reference DE table; `score_streaming` (the `.shad` shard-stream path) refuses the metric
+before reading an archive. Existing profiles are unchanged; explicitly add this metric to the
+selected list.
 
 ---
 
@@ -2707,6 +2746,7 @@ Profiles: **v**=vcc, **2026**=vcc2026, **m**=minimal, **f**=full, **a**=anndata,
 | `delta_mae` | `mae_delta` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | — | f a |
 | `delta_mse` | `mse_delta` | $[0,\infty)$ | ↓ | $0$ | ✓ | — | — | f a |
 | `delta_pearson` | `pearson_delta` | $[-1,1]$ | ↑ | $1$ | ✓ | Δreal varies | $-1$ | m f a |
+| `delta_pearson_degs` | — | $[-1,1]$ | ↑ | $1$ | ✓ | ≥10 sig off-target, Δreal varies | $-1$ | opt-in |
 | `pds_l1` | `discrimination_score_l1` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | v m f a p |
 | `pds_l2` | `discrimination_score_l2` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f a |
 | `pds_cosine` | `discrimination_score_cosine` | $[0,1]$ | ↑ | $1$ | ✓ | — | — | f a 2026 |
@@ -2759,7 +2799,8 @@ Profiles: **v**=vcc, **2026**=vcc2026, **m**=minimal, **f**=full, **a**=anndata,
 > union) to $1.0$ inside the metric. The other v2 worst values are applied by the v2 dispatch
 > (issue \#89 / \#92) while v1 keeps the upstream omit/NaN behavior. Since \#391 the v2
 > dispatch applies the gate first: outside it the row is NaN whatever the metric returned,
-> including an in-metric $-1$.
+> including an in-metric $-1$. `delta_pearson_degs` (§2.6) applies both its gate and its $-1$
+> inside the metric, because an anndata metric cannot carry a DE-table gate.
 
 ---
 
@@ -2784,9 +2825,9 @@ perturbation and of the control to pick their responding genes. Select them with
 
 `score_cellstream` scores them in a separate pass after its partitioned loop, through the same
 archive reader. Select them by name next to a selection that driver supports: no moments metric,
-and both `de_wilcoxon_nsig_counts_real` and `de_wilcoxon_nsig_counts_pred`, from which it always
-reconstructs `de_wilcoxon_nsig_spearman` (without them a call fails after the DE run, cell
-metric or not). A cell-only selection, `metrics="cell"` included, is refused there. Before any DE
+and, when `de_wilcoxon_nsig_spearman` is selected, both `de_wilcoxon_nsig_counts_real` and
+`de_wilcoxon_nsig_counts_pred`, from which it rebuilds that metric (without them such a call
+fails after the DE run, cell metric or not). A cell-only selection, `metrics="cell"` included, is refused there. Before any DE
 runs it checks that both sides resolve
 to raw counts and, for `cell_cov_ccc` on a CUDA device, that `mem_budget.gpu_bytes` holds
 `21·G²` bytes, the upper end of the §8.3 peak-scratch range. When some perturbation has at least

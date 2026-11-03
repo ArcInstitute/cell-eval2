@@ -625,3 +625,52 @@ def test_assemble_score_result_refuses_a_derived_metrics_per_perturbation_rows()
     with pytest.raises(ValueError, match="derived metric"):
         h5ad_manifest._assemble_score_result([_pp([
             ("D", 0, "ctxA", "A", "expr_mse_unbiased_capped_norm", 0.5)])])
+
+
+@pytest.mark.parametrize("metrics, version, expected", [
+    ("de", "v2", True), ("full", "v2", True), (["de_wilcoxon_nsig_spearman"], "v2", True),
+    ("minimal", "v2", False), ("vcc", "v2", False), ("pds", "v2", False),
+    (["delta_pearson_degs"], "v2", False), ("de", "v1", True), ("minimal", "v1", False),
+])
+def test_nsig_spearman_is_rebuilt_only_when_selected(metrics, version, expected):
+    """#416: the partitioned drivers rebuild the cross-perturbation Spearman only for a selection
+    that emits it, under the version's own name (v1 `de_spearman_sig`)."""
+    from cell_eval2.config import EvalConfig
+    cfg = EvalConfig(metrics=metrics, version=version)
+    nsig_metric = h5ad_manifest._nsig_names(cfg)[0]
+    assert h5ad_manifest._nsig_spearman_requested(cfg, nsig_metric) is expected
+
+
+@pytest.mark.parametrize("metrics, expected", [
+    (["delta_pearson_degs"], False), ("minimal", False), ("vcc", False), ("de", True),
+])
+def test_score_h5ad_manifest_asks_for_the_rebuild_only_when_selected(
+        tmp_path, monkeypatch, metrics, expected):
+    """The driver's call site, on CPU: the reference builders, the bundle and the scorer are
+    stubbed, and the aggregator records what it was asked and stops the run."""
+    from dataclasses import replace
+
+    from cell_eval2 import partition, partition_inmem as pinmem
+    from cell_eval2.config import EvalConfig
+
+    man = _make_synth_artifact(str(tmp_path), contexts=["ctxA"], perts=["A", "B"],
+                               n_cells_per=20, n_genes=10)
+    monkeypatch.setattr(pinmem, "build_reference_streaming", lambda *a, **k: None)
+    monkeypatch.setattr(pinmem, "build_pred_control_reference", lambda *a, **k: None)
+    monkeypatch.setattr(pinmem, "_RefBundle", lambda *a, **k: object())
+    monkeypatch.setattr(pinmem, "score_piece", lambda *a, **k: None)
+    asked = []
+
+    class _Done(Exception):
+        pass
+
+    def aggregate(*a, **k):
+        asked.append(k["reduce_nsig_spearman"])
+        raise _Done
+
+    monkeypatch.setattr(partition, "aggregate_partials", aggregate)
+    cfg = replace(EvalConfig.v2(), metrics=metrics)
+    mb = h5ad_manifest.MemBudget(host_bytes=10**9, gpu_bytes=10**9)
+    with pytest.raises(_Done):
+        h5ad_manifest.score_h5ad_manifest(man, config=cfg, mem_budget=mb)
+    assert asked == [expected]

@@ -56,7 +56,8 @@ differential-expression metrics apply the further restrictions of section 3.
 | `de_wilcoxon_lfc_nmae` | accuracy of predicted fold changes | 7 |
 
 **Baseline and replicate.** Two reference values are measured on the same reference data and
-distributed with it. The baseline $`b`$ is the context's mean perturbation response: an
+stored with it in the reference bundle, which is not released to participants. The baseline
+$`b`$ is the context's mean perturbation response: an
 equal-weight average, over the constructs passing a cell-count and knockdown-efficiency filter, of
 the per-construct mean count vector, assigned identically to every perturbation and scored as an
 ordinary submission. The replicate $`r`$ is the reference compared with itself: cells are split into

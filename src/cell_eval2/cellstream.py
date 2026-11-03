@@ -22,6 +22,7 @@ from .cell_source import cell_fingerprint
 from ._threads import resolve_gather_threads
 from .evaluation_results import FILENAME
 from .h5ad_manifest import plan_pert_batches
+from .io import require_pert_labels
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _sanitize_cell_adata(adata):
+def _sanitize_cell_adata(adata, *, keep_missing=(), index=True):
     """Cast pandas string-extension (StringArray/ArrowStringArray) indices and columns in
     ``obs``/``var`` to numpy ``object`` dtype in place, and return ``adata``.
 
@@ -42,12 +43,18 @@ def _sanitize_cell_adata(adata):
     ``partition_inmem.py``) refuses to write these (``allow_write_nullable_strings=False``).
     h5ad-sourced AnnData carry plain ``object`` strings, so this makes cell-sourced batches match
     and keeps the shared downstream partition/gpudge path unchanged.
+
+    Missing values in a string column become ``""``. An ``object`` column counts as a string
+    column when its non-missing values are all ``str``. A column that is missing on every row
+    holds no ``str``, so anndata does not categorize it and h5py rejects the missing values.
+    ``keep_missing`` names ``obs`` columns whose missing values are kept. ``index=False`` leaves
+    ``obs_names`` and ``var_names`` as given; ``index=True`` casts any extension-dtype index to ``object``.
     """
-    for names_attr in ("obs_names", "var_names"):
+    for names_attr in ("obs_names", "var_names") if index else ():
         idx = getattr(adata, names_attr)
         if pd.api.types.is_extension_array_dtype(idx.dtype):
             setattr(adata, names_attr, idx.astype(object))
-    for df in (adata.obs, adata.var):
+    for df, keep in ((adata.obs, keep_missing), (adata.var, ())):
         for col in df.columns:
             dtype = df[col].dtype
             # Only the nullable/Arrow string extension arrays are the h5ad-write problem; leave
@@ -57,6 +64,10 @@ def _sanitize_cell_adata(adata):
                     and pd.api.types.is_string_dtype(dtype)
                     and not isinstance(dtype, pd.CategoricalDtype)):
                 df[col] = df[col].astype(object)
+            if not pd.api.types.is_object_dtype(df[col].dtype) or col in keep:
+                continue
+            if df[col].isna().any() and pd.api.types.infer_dtype(df[col], skipna=True) in ("string", "empty"):
+                df[col] = df[col].fillna("")
     return adata
 
 
@@ -70,21 +81,26 @@ class CellBatchSource:
     def __init__(self, store_or_path, *, pert_col, control, context=None, context_col="context",
                  gather_threads=-1):
         self.store = open_cell_store(store_or_path)
-        self.pert_col = str(pert_col)
-        self.control = str(control)
-        self.context = context
-        # EvalConfig.gather_threads, stored VERBATIM (-1 = auto), NOT int()-coerced: coercion
-        # would turn True/1.5 into 1, a new silent-serial path. It is resolved per gather --
-        # against that gather's row count -- and resolve_gather_threads raises on a bad value.
-        self.gather_threads = gather_threads
-        self.stream_tag = f"{cell_fingerprint(self.store)}|ctx:{context}"
-        obs = self.store.obs
-        self._labels = obs[self.pert_col].to_numpy().astype(str)
-        if context is None:
-            self._rows_all = np.arange(int(self.store.n_obs), dtype=np.int64)
-        else:
-            ctx = obs[context_col].to_numpy().astype(str)
-            self._rows_all = np.flatnonzero(ctx == str(context)).astype(np.int64)
+        try:
+            self.pert_col = str(pert_col)
+            self.control = str(control)
+            self.context = context
+            obs = self.store.obs
+            require_pert_labels(obs[self.pert_col], self.pert_col, side="cell archive")
+            # EvalConfig.gather_threads, stored VERBATIM (-1 = auto), NOT int()-coerced: coercion
+            # would turn True/1.5 into 1, a new silent-serial path. It is resolved per gather --
+            # against that gather's row count -- and resolve_gather_threads raises on a bad value.
+            self.gather_threads = gather_threads
+            self.stream_tag = f"{cell_fingerprint(self.store)}|ctx:{context}"
+            self._labels = obs[self.pert_col].to_numpy().astype(str)
+            if context is None:
+                self._rows_all = np.arange(int(self.store.n_obs), dtype=np.int64)
+            else:
+                ctx = obs[context_col].to_numpy().astype(str)
+                self._rows_all = np.flatnonzero(ctx == str(context)).astype(np.int64)
+        except BaseException:
+            self.store.close()
+            raise
 
     def read_control_block(self) -> "ad.AnnData":
         rows = self._rows_all[self._labels[self._rows_all] == self.control]
@@ -95,7 +111,8 @@ class CellBatchSource:
             )
         rows = np.sort(rows)
         return _sanitize_cell_adata(self.store.gather_rows_adata(
-            rows, n_threads=resolve_gather_threads(rows.size, self.gather_threads)))
+            rows, n_threads=resolve_gather_threads(rows.size, self.gather_threads)),
+            keep_missing=(self.pert_col,))
 
     def pert_universe(self) -> list[str]:
         """Sorted unique non-control perturbation labels of this context, without streaming a
@@ -137,8 +154,10 @@ class CellBatchSource:
                                              itemsize=itemsize, control_cells=ctrl_n,
                                              mem_budget=mem_budget):
             rows = np.sort(np.concatenate([rows_by[p] for p in batch_perts]))
+            # batch_perts came from the raw labels in __init__; filling would move rows out of their group.
             yield batch_perts, _sanitize_cell_adata(self.store.gather_rows_adata(
-                rows, n_threads=resolve_gather_threads(rows.size, self.gather_threads)))
+                rows, n_threads=resolve_gather_threads(rows.size, self.gather_threads)),
+                keep_missing=(self.pert_col,))
 
     def close(self):
         self.store.close()
@@ -185,6 +204,7 @@ def _control_label(store, cfg) -> str:
             f"perturbation column {cfg.pert_col!r} missing from the archive's obs; "
             f"got {sorted(map(str, obs.columns))}"
         )
+    require_pert_labels(obs[cfg.pert_col], cfg.pert_col, side="real")
     present = obs[cfg.pert_col].astype(str)
     if not (present == label).any():
         available = sorted(set(present.unique()))
@@ -895,7 +915,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     )
     from .run import RunFacts, _cache_device, _resolve_config, metric_output_names
     from .settings import check_recordable
-    from .h5ad_manifest import _assemble_score_result, _nsig_names
+    from .h5ad_manifest import _assemble_score_result, _nsig_names, _nsig_spearman_requested
 
     # Fail fast, before any archive I/O, on the one combination that cannot be honoured: the DE
     # tables have nowhere to land without an outdir (#387).
@@ -949,7 +969,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     if reason is not None:
         logger.warning("%s", reason)
     expected = metric_output_names(replace(cfg, metrics=_selected))
-    de_used = any(CATALOG[n].kind == "de" for n in _selected)
+    de_used = any(CATALOG[n].kind == "de" or CATALOG[n].needs_real_de for n in _selected)
 
     # Fail fast on the other unhonourable write_de combination: a metric selection that resolves
     # to no DE-kind metric would score_piece every batch, write zero {piece_id}__de_pred.parquet
@@ -999,6 +1019,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
         real_store.close()
     pred_store = open_cell_store(pred)
     try:
+        require_pert_labels(pred_store.obs[cfg.pert_col], cfg.pert_col, side="pred")
         pred_itype = _resolve_input_type_cell(pred_store, cfg)
     finally:
         pred_store.close()
@@ -1150,7 +1171,9 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                 )
 
             full, _agg = aggregate_partials(
-                parts_dir, reduce_nsig_spearman=True, nsig_spearman_metric=nsig_spearman,
+                parts_dir,
+                reduce_nsig_spearman=_nsig_spearman_requested(cfg, nsig_spearman),
+                nsig_spearman_metric=nsig_spearman,
                 nsig_real_metric=nsig_real, nsig_pred_metric=nsig_pred)
 
             # The cell pass, before anything is staged: a failure here leaves outdir untouched.

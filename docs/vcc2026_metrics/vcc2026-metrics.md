@@ -65,7 +65,8 @@ panel-wide sums and has no per-perturbation value.
 | `de_wilcoxon_lfc_nmae` | accuracy of predicted fold changes | 6 |
 
 **Baseline and replicate.** Each metric is reported against two values measured on the same
-reference data and distributed with it. The baseline $`b`$ is the context's mean perturbation
+reference data and stored with it in the reference bundle, which is not released to participants.
+The baseline $`b`$ is the context's mean perturbation
 response: an equal-weight average, over the constructs of that context passing a cell-count and
 knockdown-efficiency filter, of the per-construct mean count vector, assigned identically to every
 perturbation and then scored as an ordinary submission. The replicate $`r`$ is the reference compared

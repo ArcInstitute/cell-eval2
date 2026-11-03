@@ -402,3 +402,34 @@ def test_score_rowstore_threads_the_resolved_target_to_the_BUNDLE_and_every_scor
             f"a piece was scored at target_sum={c.target_sum!r}, not {expected!r}")
     # ...and it is the SAME bundle object for every piece (#153), not one per batch.
     assert all(b is piece_bundles[0] for b in piece_bundles) and piece_bundles[0] is not None
+
+
+@pytest.mark.parametrize("metrics, expected", [
+    (["delta_pearson_degs"], False), ("minimal", False), ("vcc", False), ("de", True),
+])
+def test_score_rowstore_asks_for_the_nsig_spearman_rebuild_only_when_selected(
+        tmp_path, monkeypatch, metrics, expected):
+    """#416 at this driver's call site, on CPU, stubbed like the test above."""
+    from cell_eval2 import partition, partition_inmem as pinmem
+
+    staging, *_ = _one_ctx_staging(tmp_path)
+    monkeypatch.setattr(pinmem, "_require_partition_config", lambda c: c)
+    monkeypatch.setattr(pinmem, "_build_reference_streaming_core", lambda *a, **k: None)
+    monkeypatch.setattr(pinmem, "_build_pred_control_reference_core", lambda *a, **k: None)
+    monkeypatch.setattr(pinmem, "_RefBundle", lambda *a, **k: object())
+    monkeypatch.setattr(pinmem, "score_piece", lambda *a, **k: None)
+    asked = []
+
+    class _Done(Exception):
+        pass
+
+    def aggregate(*a, **k):
+        asked.append(k["reduce_nsig_spearman"])
+        raise _Done
+
+    monkeypatch.setattr(partition, "aggregate_partials", aggregate)
+    cfg = replace(EvalConfig.v2(), pert_col="perturbation", metrics=metrics)
+    mem = MemBudget(host_bytes=10**9, gpu_bytes=10**9)
+    with pytest.raises(_Done):
+        rs.score_rowstore(staging, config=cfg, mem_budget=mem, output_space="scaled_log1p")
+    assert asked == [expected]

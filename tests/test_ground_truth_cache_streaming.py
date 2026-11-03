@@ -1270,3 +1270,31 @@ def test_fixture_real_archive_pert_universe(tmp_path):
     finally:
         src.close()
     assert universe == sorted(f"TG0{i}" for i in range(1, 7))
+
+
+@pytest.mark.parametrize("where", ["both", "pred_only"])
+def test_score_cellstream_reference_cache_accepts_missing_obs_strings(monkeypatch, where):
+    """A string obs column that is missing on every control row must not stop the reference
+    cache (real_control.h5ad, pred_control.h5ad) from being written."""
+    real_store, pred_store = _open_fake_stores(monkeypatch)
+    for store in (pred_store,) if where == "pred_only" else (real_store, pred_store):
+        is_ctrl = (store.obs["perturbation"] == "control").to_numpy()
+        store.obs["support_sha256"] = pd.array(
+            [None if c else f"sha{i}" for i, c in enumerate(is_ctrl)], dtype="string")
+    fake_de, _calls = make_fake_compute_de()
+    monkeypatch.setattr(partition_inmem, "compute_de", fake_de)
+    written = []
+    orig_write = ad.AnnData.write_h5ad
+
+    def spy(self, filename, *args, **kwargs):
+        written.append(os.path.basename(str(filename)))
+        return orig_write(self, filename, *args, **kwargs)
+
+    monkeypatch.setattr(ad.AnnData, "write_h5ad", spy)
+
+    result = cellstream.score_cellstream("pred.path", "real.path",
+                                         config=_gt_cfg_de_only(control_source="pred"),
+                                         mem_budget=_BIG)
+
+    assert sorted(result.per_pert["perturbation"].unique().to_list()) == ["A", "B"]
+    assert {"real_control.h5ad", "pred_control.h5ad"} <= set(written)

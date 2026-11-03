@@ -2,6 +2,7 @@ import json
 from dataclasses import replace
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 
@@ -403,6 +404,56 @@ def test_build_saves_pred_when_asked(synthetic_pair, tmp_path):
     np.testing.assert_allclose(mean, res.profile.values.astype(np.float32), rtol=2e-6)
 
 
+def _baseline_case(emit, synthetic_pair):
+    """(real, build kwargs) for a lognorm `tile` reference or a counts `dispersed` one."""
+    if emit == "tile":
+        return synthetic_pair[1], dict(config=_cfg(), emit="tile")
+    from test_baseline_emission import _counts_cfg, _heterogeneous_counts
+    return _heterogeneous_counts(), dict(
+        config=_counts_cfg(["expr_mae"]), emit="dispersed", exclude_target_gene=False,
+        allow_degenerate=True)
+
+
+@pytest.mark.parametrize("emit", ["tile", "dispersed"])
+@pytest.mark.parametrize("axis", ["obs", "var"])
+@pytest.mark.parametrize("missing", ["all", "partial"])
+@pytest.mark.parametrize("kind", ["object", "string"])
+def test_build_saves_pred_when_a_string_column_has_missing_values(
+        synthetic_pair, tmp_path, emit, axis, missing, kind):
+    """`save_pred` writes a string column with missing values as "" (the `score_cellstream`
+    rule), also when the column is missing on every row; no metric changes and the caller's
+    reference is not modified."""
+    import anndata as ad
+    real, kw = _baseline_case(emit, synthetic_pair)
+    clean = build_generic_baseline(real, **kw)
+
+    frame = getattr(real, axis)
+    values = [None if missing == "all" or i % 3 == 0 else f"v{i}" for i in range(len(frame))]
+    dtype = object if kind == "object" else "string"
+    frame["note"] = pd.Series(values, index=frame.index, dtype=dtype)
+    out = tmp_path / "baseline_pred.h5ad"
+
+    res = build_generic_baseline(real, save_pred=str(out), **kw)
+
+    saved = getattr(ad.read_h5ad(out), axis)
+    assert saved["note"].astype(str).tolist() == ["" if v is None else v for v in values]
+    assert res.agg.equals(clean.agg)
+    assert [None if pd.isna(v) else v for v in frame["note"]] == values
+
+
+def test_build_rejects_missing_perturbation_labels(synthetic_pair, tmp_path):
+    _, real = synthetic_pair
+    labels = real.obs["target"].astype(object).to_numpy().copy()
+    labels[[30, 60]] = None
+    real.obs["target"] = labels
+    out = tmp_path / "baseline_pred.h5ad"
+
+    with pytest.raises(ValueError, match=r"2 of \d+ cells in real .*'target'"):
+        build_generic_baseline(real, config=_cfg(), save_pred=str(out), emit="tile")
+
+    assert not out.exists()
+
+
 def test_build_scored_against_itself_is_zero(synthetic_pair):
     from cell_eval2 import score_metrics
     _, real = synthetic_pair
@@ -593,3 +644,46 @@ def test_gate_catches_the_FORMERLY_SILENT_case_too():
     # non-finite is recorded as None, not NaN: json.dump would otherwise emit a bare `NaN`
     assert found["pds_cosine"]["value"] is None
     json.dumps(found["pds_cosine"], allow_nan=False)
+
+
+def test_build_saves_pred_keeps_a_categorical_index_and_reads_a_clean_string_column(
+        synthetic_pair, tmp_path):
+    import anndata as ad
+    _, real = synthetic_pair
+    real.obs_names = pd.CategoricalIndex([str(x) for x in real.obs_names])
+    real.var_names = pd.CategoricalIndex([str(x) for x in real.var_names])
+    real.obs["note"] = pd.Series(
+        pd.array([f"v{i}" for i in range(real.n_obs)], dtype="string"), index=real.obs.index)
+    out = tmp_path / "baseline_pred.h5ad"
+
+    build_generic_baseline(real, config=_cfg(), save_pred=str(out), emit="tile")
+
+    saved = ad.read_h5ad(out)
+    assert isinstance(saved.obs_names.dtype, pd.CategoricalDtype)
+    assert isinstance(saved.var_names.dtype, pd.CategoricalDtype)
+    # A clean nullable `string` column reads back as the default string dtype of the installed
+    # pandas: `str` on pandas 3, `object` on pandas 2.
+    assert saved.obs["note"].dtype == pd.Series(["a"]).dtype
+    assert saved.obs["note"].tolist() == [f"v{i}" for i in range(real.n_obs)]
+
+
+def test_build_saves_pred_with_a_missing_cell_name(synthetic_pair, tmp_path):
+    """The index is written as given: a nullable-string `obs_names` with a missing name writes on
+    pandas 3, and the name reads back missing. anndata on pandas 2 refuses any nullable-string
+    index, with or without the missing name."""
+    import anndata as ad
+    _, real = synthetic_pair
+    names = [f"cell{i}" for i in range(real.n_obs)]
+    names[3] = None
+    real.obs_names = pd.Index(pd.array(names, dtype="string"))
+    out = tmp_path / "baseline_pred.h5ad"
+
+    if int(pd.__version__.split(".")[0]) < 3:
+        with pytest.raises(RuntimeError, match="allow_write_nullable_strings"):
+            build_generic_baseline(real, config=_cfg(), save_pred=str(out), emit="tile")
+        return
+    build_generic_baseline(real, config=_cfg(), save_pred=str(out), emit="tile")
+
+    saved = ad.read_h5ad(out)
+    assert pd.isna(saved.obs_names[3])
+    assert saved.obs_names[:3].tolist() == names[:3]

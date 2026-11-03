@@ -15,6 +15,7 @@ from .metrics.delta import (
     pearson_delta,
     real_mass_ratio,
 )
+from .metrics.delta_degs import pearson_delta_degs
 from .metrics.de import (
     de_direction_match,
     de_lfc_nmae,
@@ -102,6 +103,8 @@ class MetricSpec:
     # function signature: this boolean selects which cache artifact a run reads, and a wrong
     # derivation would change that silently.
     needs_moments: bool = False
+    # Expression metric whose gene selection depends on the reference DE table.
+    needs_real_de: bool = False
     derived: DerivedAgg | None = None        # set <=> func is None
     # v2 only (#391). Which perturbations the REFERENCE alone lets this metric score; outside the
     # gate the row is NaN and it leaves the aggregate. Read by `run.dispatch_*_metrics` and
@@ -287,7 +290,7 @@ def _disc(distance: str) -> Callable:
 
 
 # #412, design §5.5: bump when a metric is added, removed, or bumps its version.
-METRICS_VERSION: int = 1
+METRICS_VERSION: int = 2
 
 
 CATALOG: dict[str, MetricSpec] = {
@@ -331,6 +334,11 @@ CATALOG: dict[str, MetricSpec] = {
         # points are every measured gene. The near-constant prediction is out of scope (spec §8).
         worst_value=-1.0, real_gate=RealGate("delta_var", min_gate_size=None),
         tolerance="continuous",
+    ),
+    "delta_pearson_degs": MetricSpec(
+        name="delta_pearson_degs", func=pearson_delta_degs, scoring=BOUNDED,
+        agg="mean", profiles=(), kind="anndata", normalization="expr_comparator",
+        needs_real_de=True, tolerance="continuous",
     ),
     "expr_mse": MetricSpec(
         name="expr_mse", v1_name="mse", func=mse, scoring=ERROR, agg="mean",

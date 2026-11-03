@@ -36,10 +36,11 @@ from .cache import fingerprint_adata, fingerprint_de_table
 from .catalog import (
     CATALOG, METRICS_VERSION, _NAME_TO_CANONICAL, derived_policy, is_decisive, resolve_metrics,
 )
+from .cellstream import _sanitize_cell_adata
 from .config import EvalConfig, target_gene_entry
 from .de import load_de_table
 from .distances import resolve_exclusion_columns
-from .io import load_anndata
+from .io import load_anndata, require_pert_labels
 from .prep import pseudobulk
 from .scoring import denominator, is_degenerate
 from .run import _close_backed, effective_normalization   # build_run_meta's backed
@@ -155,6 +156,7 @@ def _profile_from_adata(
             f"perturbation column {pert_col!r} missing from adata.obs; "
             f"present: {list(adata.obs.columns)}"
         )
+    require_pert_labels(adata.obs[pert_col], pert_col, side="real")
     # Validate the control label from obs FIRST: it is a cheap metadata read, and a
     # mistyped label would otherwise cost a full grouped-mean pass over the reference
     # before failing.
@@ -485,6 +487,7 @@ def _prediction_from_adata(
             f"({genes.size} vs {profile.genes.size} entries); the profile must be built "
             "from the same reference used as the template"
         )
+    require_pert_labels(adata.obs[pert_col], pert_col, side="template")
     labels = adata.obs[pert_col].to_numpy().astype(str)
     ctrl_mask = labels == control
     if not ctrl_mask.any():
@@ -622,6 +625,8 @@ def _lock_from_adata(adata, pred, config: EvalConfig, *, de_pred=None, de_real=N
     ``metrics=["expr_mae"]`` run with a numeric ``target_sum`` re-detects neither subset, so
     a subset disagreement nothing will ever look at would fail a run that was correct.
     """
+    require_pert_labels(adata.obs[config.pert_col], config.pert_col, side="real")
+    require_pert_labels(pred.obs[config.pert_col], config.pert_col, side="pred")
     ctrl = adata.obs[config.pert_col].to_numpy().astype(str) == config.control
     pred_ctrl = pred.obs[config.pert_col].to_numpy().astype(str) == config.control
     from .run import _use_inmem_external_ref
@@ -1179,6 +1184,7 @@ def build_run_meta(config: EvalConfig, real, pred, *, de_real=None, de_pred=None
                     f"perturbation column {config.pert_col!r} missing from the {side} side's "
                     f"obs; present: {list(adata.obs.columns)}"
                 )   # else fingerprint_adata raises a bare KeyError from cache.py:95
+            require_pert_labels(adata.obs[config.pert_col], config.pert_col, side=side)
             if fp_field:
                 meta[fp_field] = fingerprint_adata(adata, pert_col=config.pert_col,
                                                    strict=config.cache_strict)
@@ -1283,7 +1289,7 @@ def _de_backend_used(config: EvalConfig, names, de_real=None) -> bool:
     so it still never resolves ``auto`` for a run that needs no engine -- which would depend
     on a backend being installed, and would raise on a CUDA host without gpudge.
     """
-    if not any(CATALOG[n].kind == "de" for n in names):
+    if not any(CATALOG[n].kind == "de" or CATALOG[n].needs_real_de for n in names):
         return False
     return de_real is None
 
@@ -1585,7 +1591,8 @@ def build_generic_baseline(
     # (compute_metrics writes its own run_params.yaml when outdir is set; that is a record
     # of the attempt, not an artifact anyone scores.)
     if save_pred is not None:
-        pred.write_h5ad(save_pred)
+        _sanitize_cell_adata(pred, keep_missing=(config.pert_col,), index=False).write_h5ad(
+            save_pred)
 
     resolved = resolve_metrics(effective.metrics, version=effective.version)[0]
     effective_types = {

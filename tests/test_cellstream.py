@@ -19,8 +19,13 @@ def _genes(n_genes):
     return targets + [f"g{j}" for j in range(len(targets), n_genes)]
 
 
-def _write_cell(tmp_path, name, seed, *, n_per=30, n_genes=50, contexts=("ctxA",), lognorm=False):
-    """Write a grouped, reference-first cell archive; return (shad_path, adata)."""
+def _write_cell(tmp_path, name, seed, *, n_per=30, n_genes=50, contexts=("ctxA",), lognorm=False,
+                sha_dtype=None, unused_gene_categories=None):
+    """Write a grouped, reference-first cell archive; return (shad_path, adata).
+
+    ``sha_dtype`` ("string" or "object") adds an obs column ``support_sha256`` that is missing on
+    every control row. ``unused_gene_categories`` makes ``var_names`` a ``CategoricalIndex`` whose
+    categories are the genes plus these unused names."""
     pytest.importorskip("cellstream")
     from cellstream.cell import write_cell_archive
     rng = np.random.default_rng(seed)
@@ -39,7 +44,14 @@ def _write_cell(tmp_path, name, seed, *, n_per=30, n_genes=50, contexts=("ctxA",
          "control_value": np.repeat("control", n), "dataset": np.repeat("dsX", n)},
         index=[f"{name}_c{i}" for i in range(n)],
     )
-    var = pd.DataFrame(index=_genes(n_genes))
+    if sha_dtype is not None:
+        sha = [None if p == "control" else f"sha{i}" for i, p in enumerate(pert)]
+        obs["support_sha256"] = (pd.array(sha, dtype="string") if sha_dtype == "string"
+                                 else pd.Series(sha, dtype=object, index=obs.index))
+    genes = _genes(n_genes)
+    if unused_gene_categories is not None:
+        genes = pd.CategoricalIndex(genes, categories=genes + list(unused_gene_categories))
+    var = pd.DataFrame(index=genes)
     adata = ad.AnnData(X=X, obs=obs, var=var)
     shad = tmp_path / f"{name}.shad"
     ref = (obs["perturbation"] == "control").to_numpy()
@@ -57,6 +69,20 @@ def test_cellbatchsource_control_block(tmp_path):
         assert set(ctrl.obs["perturbation"].astype(str)) == {"control"}
         assert ctrl.n_obs == 30
         assert list(ctrl.var.index) == _genes(50)
+    finally:
+        src.close()
+
+
+@pytest.mark.parametrize("sha_dtype", ["string", "object"])
+def test_real_archive_control_block_with_missing_strings_is_h5ad_writable(tmp_path, sha_dtype):
+    from cell_eval2.cellstream import CellBatchSource
+    shad, _ = _write_cell(tmp_path, "real", 2, sha_dtype=sha_dtype)
+    src = CellBatchSource(shad, pert_col="perturbation", control="control")
+    try:
+        assert src.store.obs["support_sha256"].isna().any()
+        src.read_control_block().write_h5ad(tmp_path / "real_control.h5ad")
+        back = ad.read_h5ad(tmp_path / "real_control.h5ad")
+        assert back.obs["support_sha256"].astype(str).tolist() == [""] * 30
     finally:
         src.close()
 
@@ -273,9 +299,70 @@ def test_score_cellstream_smoke_gpu(tmp_path):
     assert set(res.per_context["context"].to_list()) == {"ctxA"}
 
 
+def test_score_cellstream_scores_a_categorical_gene_index_with_an_unused_category(
+        tmp_path, monkeypatch):
+    """The cache path casts every extension-dtype index to object, so two archives with the same
+    genes and different category sets still have equal `var_names` in the external-reference DE."""
+    from cell_eval2.cellstream import score_cellstream
+    from cell_eval2.config import DEParams, EvalConfig
+    from test_target_sum_resolution import _stub_gpudge
+
+    seen = {}
+    _stub_gpudge(monkeypatch, seen, control="control", n_genes=50)
+    pred, _ = _write_cell(tmp_path, "pred", 1, unused_gene_categories=["unused_gene"])
+    real, _ = _write_cell(tmp_path, "real", 2, unused_gene_categories=[])
+    cfg = EvalConfig(
+        device="cpu", pert_col="perturbation", control="control", metrics=["de_wilcoxon_overlap"],
+        input_type="counts", de=DEParams(backend="gpudge", p_adj_threshold=1.0))
+
+    score_cellstream(pred, real, config=cfg, mem_budget=_BIG)
+
+    assert len(seen["calls"]) >= 2   # the reference's DE and a prediction piece's DE
+
+
 def test_score_cellstream_exported():
     import cell_eval2
     assert hasattr(cell_eval2, "score_cellstream")
+
+
+@pytest.mark.parametrize("control_source", ["pred", "real"])
+def test_true_degs_metric_alone_matches_inmemory(tmp_path, control_source):
+    _skip_if_no_gpu()
+    from cell_eval2.cellstream import score_cellstream
+    from cell_eval2.config import DEParams, EvalConfig
+    from cell_eval2.run import compute_metrics
+    from cell_eval2.scale import score_streaming_cell
+
+    pred, _ = _write_cell(tmp_path, "pred", 1)
+    real, _ = _write_cell(tmp_path, "real", 2)
+    cfg = EvalConfig(
+        device="cuda", pert_col="perturbation", control="control",
+        metrics=["delta_pearson_degs"], input_type="counts", control_source=control_source,
+        de=DEParams(backend="gpudge", p_adj_threshold=1.0),
+    )
+    want = compute_metrics(pred, real, config=cfg)
+    got = score_cellstream(pred, real, config=cfg, mem_budget=_BIG).per_pert.drop(
+        ["dataset", "panel_id", "context"])
+    assert set(got["metric"]) == {"delta_pearson_degs"}
+    assert np.isfinite(got["value"].to_numpy()).any()
+    _assert_parity(got, want)
+    _assert_parity(score_streaming_cell(pred, real, config=cfg), want)
+
+
+@pytest.mark.parametrize("index, expected", [(True, "object"), (False, "category")])
+def test_sanitize_cell_adata_index_flag_controls_the_index_cast(index, expected):
+    from cell_eval2.cellstream import _sanitize_cell_adata
+    a = ad.AnnData(
+        X=sp.csr_matrix(np.ones((3, 4), dtype=np.float32)),
+        obs=pd.DataFrame({"perturbation": ["control", "control", "GENE_A"]},
+                         index=pd.CategoricalIndex(["c0", "c1", "c2"])),
+        var=pd.DataFrame(index=pd.CategoricalIndex(["g0", "g1", "g2", "g3"])),
+    )
+
+    _sanitize_cell_adata(a, index=index)
+
+    assert str(a.obs_names.dtype) == expected
+    assert str(a.var_names.dtype) == expected
 
 
 def test_sanitize_cell_adata_makes_h5ad_writable(tmp_path):
@@ -303,6 +390,120 @@ def test_sanitize_cell_adata_makes_h5ad_writable(tmp_path):
     assert a.obs["perturbation"].dtype == object
     assert list(a.var_names) == [f"g{j}" for j in range(4)]             # values preserved
     a.write_h5ad(tmp_path / "roundtrip.h5ad")   # the real check: no allow_write_nullable RuntimeError
+
+
+def _sanitize_adata(n=4):
+    return ad.AnnData(
+        X=sp.csr_matrix(np.ones((n, n), dtype=np.float32)),
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(n)]),
+        var=pd.DataFrame(index=[f"g{j}" for j in range(n)]),
+    )
+
+
+def _typed_column(kind, values, index):
+    if kind == "object":
+        return pd.Series(values, index=index, dtype=object)
+    if kind == "str":   # pandas 3 default string dtype; object on pandas 2
+        return pd.Series(values, index=index, dtype="str")
+    return pd.Series(pd.array(values, dtype=kind), index=index)
+
+
+def _written_values(adata, axis, tmp_path):
+    adata.write_h5ad(tmp_path / "out.h5ad")
+    return getattr(ad.read_h5ad(tmp_path / "out.h5ad"), axis)["col"].astype(str).tolist()
+
+
+@pytest.mark.parametrize("axis", ["obs", "var"])
+@pytest.mark.parametrize("kind,fill", [
+    ("string", None),
+    ("string[pyarrow]", None),
+    ("object", None),
+    ("object", np.nan),
+    ("str", np.nan),
+])
+def test_sanitize_cell_adata_all_missing_string_column_is_writable(tmp_path, axis, kind, fill):
+    from cell_eval2.cellstream import _sanitize_cell_adata
+    a = _sanitize_adata()
+    df = getattr(a, axis)
+    df["col"] = _typed_column(kind, [fill] * 4, df.index)
+
+    out = _sanitize_cell_adata(a)
+    dtype, values = df["col"].dtype, df["col"].tolist()   # the write below categorizes strings
+    written = _written_values(a, axis, tmp_path)
+
+    assert out is a
+    assert pd.api.types.is_object_dtype(dtype)
+    assert values == [""] * 4
+    assert written == [""] * 4
+
+
+@pytest.mark.parametrize("axis", ["obs", "var"])
+@pytest.mark.parametrize("kind,values,expected", [
+    ("string", ["a1", None, "b2", None], ["a1", "", "b2", ""]),
+    ("string[pyarrow]", ["a1", None, "b2", None], ["a1", "", "b2", ""]),
+    ("str", ["a1", None, "b2", None], ["a1", "", "b2", ""]),
+    ("object", ["a", np.nan, None, "b"], ["a", "", "", "b"]),
+    ("object", ["a", pd.NA, "b", "c"], ["a", "", "b", "c"]),
+])
+def test_sanitize_cell_adata_partial_missing_string_column_is_filled(
+        tmp_path, axis, kind, values, expected):
+    from cell_eval2.cellstream import _sanitize_cell_adata
+    a = _sanitize_adata()
+    df = getattr(a, axis)
+    df["col"] = _typed_column(kind, values, df.index)
+
+    _sanitize_cell_adata(a)
+
+    assert df["col"].dtype == object
+    assert df["col"].tolist() == expected
+    assert _written_values(a, axis, tmp_path) == expected
+
+
+def test_sanitize_cell_adata_leaves_other_columns_alone(tmp_path):
+    from cell_eval2.cellstream import _sanitize_cell_adata
+    a = _sanitize_adata()
+    a.var.index = pd.Index([f"g{j}" for j in range(4)], dtype="string")
+    a.obs["mixed"] = pd.Series(["a", 1, None, "b"], index=a.obs.index, dtype=object)
+    a.obs["float_nan"] = [1.0, np.nan, 2.0, 3.0]
+    a.obs["cat"] = pd.Categorical(["a", None, "b", "a"])
+    a.obs["ints"] = [1, 2, 3, 4]
+    a.obs["clean_obj"] = pd.Series(list("wxyz"), index=a.obs.index, dtype=object)
+    a.obs["clean_str"] = pd.Series(pd.array(list("wxyz"), dtype="string"), index=a.obs.index)
+    before = a.obs.copy()
+    obs_names, var_names = list(a.obs_names), list(a.var_names)
+
+    _sanitize_cell_adata(a)
+
+    for col in ("mixed", "float_nan", "cat", "ints", "clean_obj"):
+        pd.testing.assert_series_equal(a.obs[col], before[col], check_index=False)
+    assert a.obs["clean_str"].dtype == object
+    assert a.obs["clean_str"].tolist() == list("wxyz")
+    assert list(a.obs_names) == obs_names
+    assert a.var_names.dtype == object
+    assert list(a.var_names) == var_names
+
+    del a.obs["mixed"]
+    a.write_h5ad(tmp_path / "out.h5ad")
+    back = ad.read_h5ad(tmp_path / "out.h5ad")
+    assert back.obs["float_nan"].isna().tolist() == [False, True, False, False]
+    assert back.obs["cat"].isna().tolist() == [False, True, False, False]
+
+
+@pytest.mark.parametrize("kind", ["string", "object"])
+def test_sanitize_cell_adata_keep_missing_skips_the_named_obs_column(kind):
+    from cell_eval2.cellstream import _sanitize_cell_adata
+    a = _sanitize_adata()
+    values = ["a", None, "b", None]
+    for df in (a.obs, a.var):
+        df["perturbation"] = _typed_column(kind, values, df.index)
+    a.obs["other"] = _typed_column(kind, values, a.obs.index)
+
+    _sanitize_cell_adata(a, keep_missing=("perturbation",))
+
+    assert a.obs["perturbation"].dtype == object
+    assert a.obs["perturbation"].isna().tolist() == [False, True, False, True]
+    assert a.obs["other"].tolist() == ["a", "", "b", ""]
+    assert a.var["perturbation"].tolist() == ["a", "", "b", ""]
 
 
 def _assert_parity(got, want):
@@ -473,6 +674,51 @@ def test_cellbatchsource_stores_gather_threads_verbatim(monkeypatch):
         assert src.gather_threads == -1
     finally:
         src.close()
+
+
+def _set_missing_support_sha(store, extra_missing_row=150):
+    """None on every control row and on one non-control row, distinct text elsewhere."""
+    is_ctrl = (store.obs["perturbation"] == "control").to_numpy()
+    values = [None if is_ctrl[i] or i == extra_missing_row else f"sha{i}"
+              for i in range(store.n_obs)]
+    store.obs["support_sha256"] = pd.array(values, dtype="string")
+    return int(is_ctrl.sum())
+
+
+def test_cellbatchsource_control_block_with_missing_strings_is_h5ad_writable(tmp_path, monkeypatch):
+    import cell_eval2.cellstream as cs
+
+    store = _FakeCellStore(n_per=100)
+    n_control = _set_missing_support_sha(store)
+    monkeypatch.setattr(cs, "open_cell_store", lambda p: store)
+    src = cs.CellBatchSource("ignored.shad", pert_col="perturbation", control="control")
+    try:
+        ctrl = src.read_control_block()
+        ctrl.write_h5ad(tmp_path / "real_control.h5ad")
+        back = ad.read_h5ad(tmp_path / "real_control.h5ad")
+        assert back.obs["support_sha256"].astype(str).tolist() == [""] * n_control
+        assert set(back.obs["perturbation"].astype(str)) == {"control"}
+
+        batches = [b for _, b in src.iter_pert_batches(_BIG)]
+        assert batches
+        for batch in batches:
+            assert not batch.obs["support_sha256"].isna().any()
+        assert "" in {v for b in batches for v in b.obs["support_sha256"]}
+    finally:
+        src.close()
+
+
+def test_cellbatchsource_rejects_a_missing_perturbation_label(monkeypatch):
+    import cell_eval2.cellstream as cs
+
+    store = _FakeCellStore(n_per=100)
+    labels = store.obs["perturbation"].tolist()
+    for i in (110, 120, 130):
+        labels[i] = None
+    store.obs["perturbation"] = pd.array(labels, dtype="string")
+    monkeypatch.setattr(cs, "open_cell_store", lambda p: store)
+    with pytest.raises(ValueError, match=r"3 of 300 cells in cell archive .*'perturbation'"):
+        cs.CellBatchSource("ignored.shad", pert_col="perturbation", control="control")
 
 
 def test_resolve_input_type_cell_plumbs_n_threads(monkeypatch):
@@ -3386,3 +3632,35 @@ def test_score_cellstream_refuses_a_differing_fact_before_any_de_work(
         cs.score_cellstream("pred.shad", "real.shad", config=settings_to_config(doc),
                             mem_budget=_BIG, check_facts=facts_checker(doc))
     assert calls == []
+
+
+@pytest.mark.parametrize("metrics, expected", [
+    (["expr_mae", "cell_cov_ccc"], False),
+    ("minimal", False),
+    (["delta_pearson_degs", "cell_cov_ccc"], False),
+    (["de_wilcoxon_nsig_spearman", "de_wilcoxon_nsig_counts_real",
+      "de_wilcoxon_nsig_counts_pred", "cell_cov_ccc"], True),
+])
+def test_score_cellstream_asks_for_the_nsig_spearman_rebuild_only_when_selected(
+        monkeypatch, metrics, expected):
+    """#416 at score_cellstream's call site, on CPU. The cell metrics are split off before the
+    partitioned pass, so the rebuild must follow what that pass scores: only a selection that
+    contains the Spearman asks for it."""
+    import polars as pl
+    import cell_eval2.partition as partition
+    from cell_eval2.cellstream import score_cellstream
+    from cell_eval2.config import EvalConfig
+
+    _stub_cell_pass_run(monkeypatch)
+    asked = []
+    full = pl.DataFrame({"perturbation": ["A", "B"], "metric": ["expr_mae"] * 2,
+                         "value": [0.25, 0.5]})
+
+    def aggregate(*a, **k):
+        asked.append(k["reduce_nsig_spearman"])
+        return full, None
+
+    monkeypatch.setattr(partition, "aggregate_partials", aggregate)
+    cfg = EvalConfig(pert_col="perturbation", metrics=metrics)
+    score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG)
+    assert asked == [expected]

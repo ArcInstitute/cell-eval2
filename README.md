@@ -124,6 +124,12 @@ Four classes, normally selected by profile rather than one at a time:
 Unscored members are **diagnostics** — reported but not enrolled in a score, usually because they
 are a scored metric's numerator, denominator or count.
 
+**Pearson delta on true DEGs** (`delta_pearson_degs`) is opt-in and in no profile: select it with
+`--set 'metrics=["delta_pearson_degs"]'`. It correlates perturbation-control expression deltas
+over the reference-significant, off-target genes, and scores a perturbation only when at least 10
+remain. It follows the run's normalization and `control_source`; predicted DEG calls do not
+select the genes. See [the definition and undefined-value policy](docs/metrics.md#26-delta_pearson_degs-v2-only-opt-in).
+
 Every metric carries a canonical **v2** name and an inherited **v1** name. `EvalConfig.version`
 (default `v2`) selects which appears in the output; it is a **naming toggle and provenance stamp,
 not a switch over the numerics**. `cell_eval2.compat` forces the full v1 standard (rank denominator
@@ -174,11 +180,10 @@ print(res.overall)     # per_pert / per_context / overall frames
   which its reference bundles do not carry: `expr_mse_unbiased`, `expr_mse_unbiased_capped`, `expr_distance_unbiased`,
   and `expr_mse_unbiased_capped_norm`, which is derived from two of them. A selection that
   resolves to any of them — including the default `"full"`, `"anndata"` and `"vcc2026"` — raises
-  `NotImplementedError`. The selection must also include `de_wilcoxon_nsig_counts_real` and
-  `de_wilcoxon_nsig_counts_pred`: the driver always reconstructs `de_wilcoxon_nsig_spearman` from
-  them, so a selection without them (the `"vcc"` and `"pds"` profiles, or `["expr_mae"]`) raises
-  `ValueError` after the whole DE run. `"de"` and `"minimal"` qualify. DE runs on gpudge only, so
-  the `de_deseq2_*` metrics are unavailable.
+  `NotImplementedError`. `de_wilcoxon_nsig_spearman` is rebuilt from the two
+  `de_wilcoxon_nsig_counts_*` metrics only when it is selected, and then both must be selected
+  too; a selection without it needs neither (`"vcc"`, `"pds"`, `["delta_pearson_degs"]`).
+  DE runs on gpudge only, so the `de_deseq2_*` metrics are unavailable.
 - At matched settings, results equal in-memory `compute_metrics`: bit-exact on rank and DE
   metrics and within `1e-7` on continuous ones. One default differs: the `min_nonzero` AUC p-value
   floor does not split across batches, so this driver computes `preserve` instead (float64,
@@ -192,9 +197,9 @@ print(res.overall)     # per_pert / per_context / overall frames
 - Handles counts and lognorm across the whole config matrix; `input_type` is auto-detected from
   the archive.
 - Also scores the cell metrics (`cell_cov_ccc`, `cell_cov_corr`, `cell_cov_eig_ratio`), selected
-  by name next to a selection the first bullet allows (no moments metric, both nsig-count
-  metrics), in a separate pass after the partitioned loop (a cell-only selection belongs to
-  `compute_metrics`). These need both sides to resolve to raw
+  by name next to a selection the first bullet allows (no moments metric, and both nsig-count
+  metrics with `de_wilcoxon_nsig_spearman`), in a separate pass after the partitioned loop (a
+  cell-only selection belongs to `compute_metrics`). These need both sides to resolve to raw
   counts, and on a CUDA device `cell_cov_ccc` needs up to `21·G²` bytes (G = gene count) within
   `mem_budget.gpu_bytes`; both are checked before any DE runs. Two of the pass's own checks also
   run before any DE, when some perturbation has at least 50 cells on both sides: for

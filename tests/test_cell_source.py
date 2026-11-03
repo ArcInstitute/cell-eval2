@@ -417,6 +417,11 @@ class _FakeGroupStore:
         # cell_metadata / cell_fingerprint (used by scale.score_streaming_cell) read
         # store.var.index.values as well as group_labels()/n_obs/n_vars.
         self.var = pd.DataFrame(index=[f"g{j}" for j in range(n_vars)])
+        # score_streaming_cell checks the perturbation labels in obs right after opening a store.
+        self.obs = pd.DataFrame(
+            {"target": np.repeat(np.asarray(list(self._sizes), dtype=object),
+                                 list(self._sizes.values()))},
+            index=[f"c{i}" for i in range(self.n_obs)])
         self.calls: list[tuple[str, int, int]] = []   # (what, n_rows, n_threads)
 
     def _load_groups(self):

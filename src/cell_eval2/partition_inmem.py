@@ -41,10 +41,11 @@ if TYPE_CHECKING:
 from .cache import config_hash, fingerprint_adata
 from . import norm as _norm
 from .catalog import CATALOG, resolve_metrics
+from .cellstream import _sanitize_cell_adata
 from .config import EvalConfig
 from .de import prepare_de, resolve_target_genes
 from .de_compute import _resolve_backend, compute_de
-from .io import load_anndata, validate_gene_axis
+from .io import load_anndata, require_pert_labels, validate_gene_axis
 from .norm import resolve_target_sum
 from .partition import PARTIAL_SEMANTICS_KEY, result_semantics, write_partial
 from .run import (_close_backed, _effective_input_type, _materialize, _needed_normalizations,
@@ -609,7 +610,8 @@ def _write_reference_bundle(cache_dir, *, cfg, bulks, control_ad,
             os.unlink(dst)
         de_df.write_parquet(dst)
     if control_format == "h5ad":
-        control_ad.write_h5ad(os.path.join(cache_dir, "real_control.h5ad"))
+        _sanitize_cell_adata(control_ad, keep_missing=(cfg.pert_col,), index=False).write_h5ad(
+            os.path.join(cache_dir, "real_control.h5ad"))
     else:  # "shad"
         from cellstream import write_sharded
 
@@ -689,9 +691,12 @@ def build_reference(real, *, config, cache_dir, control_format="shad",
         real_ad = ShardedArchive(real).to_anndata()
     else:
         real_ad = load_anndata(real, backed=isinstance(real, (str, os.PathLike)))
-        real_ref_fingerprint = fingerprint_adata(real_ad, pert_col=cfg.pert_col, strict=cfg.cache_strict)
 
     try:
+        require_pert_labels(real_ad.obs[cfg.pert_col], cfg.pert_col, side="real")
+        if not real_is_shad:
+            real_ref_fingerprint = fingerprint_adata(
+                real_ad, pert_col=cfg.pert_col, strict=cfg.cache_strict)
         # Materialize exactly once; reused below for pseudobulk (_side_bulks), the real DE
         # table (compute_de), and the control-cell slice -- none of the three mutate it in
         # place (compute_de/_to_linear always .copy() before transforming).
@@ -1284,6 +1289,7 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
 
     piece_ad = load_anndata(pred_piece, backed=isinstance(pred_piece, (str, os.PathLike)))
     try:
+        require_pert_labels(piece_ad.obs[cfg.pert_col], cfg.pert_col, side="pred piece")
         pert_values = piece_ad.obs[cfg.pert_col].astype(str)
         if cfg.control in set(pert_values):
             raise ValueError(
@@ -1374,6 +1380,8 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
             rows.extend(dispatch_anndata_metrics(
                 anndata_names, pred_bulks, real_bulks, genes, cfg,
                 comparator=comparator,
+                de_real=(bundle.real_de if any(CATALOG[n].needs_real_de
+                                              for n in anndata_names) else None),
             ))
 
         if de_names:

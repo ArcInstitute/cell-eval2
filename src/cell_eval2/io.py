@@ -4,6 +4,7 @@ import os
 
 import anndata as ad
 import numpy as np
+import pandas as pd
 
 
 def load_anndata(x: ad.AnnData | str | os.PathLike, *, backed: bool = False) -> ad.AnnData:
@@ -40,6 +41,21 @@ def validate_gene_axis(pred_genes, real_genes) -> None:
         raise ValueError("gene names/order differ between pred and real")
 
 
+def require_pert_labels(labels, pert_col: str, *, side: str) -> None:
+    """Raise ``ValueError`` if a perturbation-label column holds a missing value.
+
+    Missing means ``pd.isna`` (None, NaN, pd.NA, categorical NaN); an empty string is a label.
+    ``labels`` is one column (Series, Index or array); ``side`` names the input in the message.
+    """
+    missing = int(np.asarray(pd.isna(labels)).sum())
+    if missing:
+        raise ValueError(
+            f"{missing} of {len(labels)} cells in {side} have a missing (null) perturbation "
+            f"label in {pert_col!r}; every cell needs a label (an empty string is a label). "
+            "Drop or relabel those cells."
+        )
+
+
 def validate_pair(
     pred: ad.AnnData, real: ad.AnnData, *, pert_col: str, control: str
 ) -> None:
@@ -48,6 +64,8 @@ def validate_pair(
     for name, adata in (("pred", pred), ("real", real)):
         if pert_col not in adata.obs.columns:
             raise ValueError(f"perturbation column '{pert_col}' missing from {name}.obs")
+    for name, adata in (("pred", pred), ("real", real)):
+        require_pert_labels(adata.obs[pert_col], pert_col, side=name)
     pred_perts = np.unique(pred.obs[pert_col].to_numpy().astype(str))
     real_perts = np.unique(real.obs[pert_col].to_numpy().astype(str))
     if not np.array_equal(pred_perts, real_perts):

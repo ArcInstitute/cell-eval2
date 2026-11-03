@@ -34,7 +34,7 @@ from .cache import _hash_obj, config_hash, fingerprint_adata
 from .catalog import _LFC_NMAE_METRICS, _NAME_TO_CANONICAL, resolve_metrics
 from .ceiling import _disjoint_halves
 from .config import EvalConfig
-from .io import load_anndata
+from .io import load_anndata, require_pert_labels
 from .lfc_nmae_ref import _assert_disjoint_controls, compute_lfc_nmae_reference
 from .run import (
     _cache_backend,
@@ -212,6 +212,7 @@ def compute_replicate_anchor(
             "input_type explicitly under v2."
         )
     real_ad = load_anndata(real, backed=False)  # need it in memory to split
+    require_pert_labels(real_ad.obs[cfg.pert_col], cfg.pert_col, side="real")
     available, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
     metrics = list(available)
     # The EXPECTED OUTPUT names, per the run's own rule -- NOT the resolved canonical list.
@@ -433,7 +434,7 @@ def anchor_semantic_params(cfg: EvalConfig, real_ad, names) -> dict:
                                               pred_input_type=eff_pred,
                                               real_input_type=eff_real)
     is_pds = any(_is_discrimination(CATALOG[n].func) for n in names)
-    is_de = any(CATALOG[n].kind == "de" for n in names)
+    is_de = any(CATALOG[n].kind == "de" or CATALOG[n].needs_real_de for n in names)
     # #172 gave the EXPRESSION legs a third consumer of the map, and it is neither of the two
     # the block below was written for: `mse_unbiased_capped` and `distance_unbiased` resolve
     # each perturbation's own gene through `cfg.target_gene_map` too. Reusing `run`'s own
@@ -1009,6 +1010,7 @@ def cached_anchor(real, cfg, *, store, base_seed=0, n_splits=5):
     optimization; a corrupt one must never be fatal.
     """
     real_ad = load_anndata(real, backed=False)
+    require_pert_labels(real_ad.obs[cfg.pert_col], cfg.pert_col, side="real")
     names, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
     metrics = metric_output_names(cfg)
     fp = fingerprint_adata(real_ad, pert_col=cfg.pert_col, strict=True)

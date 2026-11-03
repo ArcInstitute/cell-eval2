@@ -20,10 +20,11 @@ from .catalog import CATALOG, _NAME_TO_CANONICAL, deseq2_metric_name, resolve_me
 from .config import DEParams, DiscriminationParams, EvalConfig, FilterParams
 from .de import assemble_prepared_de, prep_de_side, rank_de_side, resolve_target_genes
 from .gpu import resolve_device
-from .io import load_anndata, validate_pair
+from .io import load_anndata, require_pert_labels, validate_pair
 from .metrics.de import de_lfc_nmae, de_pr_auc, de_sig_jaccard
 from .metrics.direction import de_direction_reach
 from .metrics.delta import distance_unbiased, mse_unbiased, mse_unbiased_capped
+from .metrics.delta_degs import pearson_delta_degs
 from .metrics.discrimination import discrimination_score
 from .prep import (pseudobulk, pseudobulk_bulk_lognorm,
                    pseudobulk_bulk_lognorm_with_moments, pseudobulk_with_moments)
@@ -476,7 +477,7 @@ def _reject_moments_metrics(names, driver: str) -> None:
 
 def dispatch_anndata_metrics(names, pred_bulks, real_bulks, genes, cfg,
                              *, comparator: str, pred_moments=None, real_moments=None,
-                             driver="unspecified", pred_bulks_full=None) -> list[dict]:
+                             driver="unspecified", pred_bulks_full=None, de_real=None) -> list[dict]:
     """Run the anndata-kind metrics in ``names`` over precomputed pseudobulk dicts.
 
     Pure helper lifted from ``_run_metrics`` so the streaming scale runner can reuse the
@@ -541,6 +542,10 @@ def dispatch_anndata_metrics(names, pred_bulks, real_bulks, genes, cfg,
         else:
             available = {
                 "pred_bulk": pred_bulk, "real_bulk": real_bulk,
+                "de_real": de_real,
+                "p_adj_threshold": cfg.de.p_adj_threshold,
+                "min_abs_log2fc": cfg.de.min_abs_log2fc,
+                "nan_lfc_policy": cfg.de.nan_lfc_policy,
                 "comparator": key,
                 "pert_col": cfg.pert_col, "control": cfg.control,
                 "control_source": cfg.control_source, "genes": genes,
@@ -1568,7 +1573,7 @@ _ONTARGET_EXCLUSION_SEMANTICS = 2
 #: future variant. `mse_unbiased` is here even though it is never scored: it shares
 #: `metrics.delta._numerator` with the capped leg, so its column moved too.
 _ONTARGET_EXCLUDING_FUNCS = (de_sig_jaccard, de_lfc_nmae, mse_unbiased, mse_unbiased_capped,
-                             distance_unbiased)
+                             distance_unbiased, pearson_delta_degs)
 
 
 #: Bump when the MEANING of a grouped group SUM changes -- the `bulk_lognorm` pseudobulk every
@@ -2237,11 +2242,13 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
         pred_input_type=effective_types["pred"],
         real_input_type=effective_types["real"],
     )
+    has_de = any(CATALOG[n].kind == "de" for n in names)
+    needs_real_de = any(CATALOG[n].needs_real_de for n in names)
+    de_backend_used = ((has_de and (de_real is None or de_pred is None))
+                       or (needs_real_de and de_real is None))
     if on_resolved is not None:
         # #412 / design §8.3: capture before DE arguments are rebound and before the cache
         # can return; a check may refuse these resolved settings before any metric runs.
-        de_backend_used = (any(CATALOG[n].kind == "de" for n in names)
-                           and (de_real is None or de_pred is None))
         on_resolved(RunFacts(
             config=cfg,
             input_type_real=effective_types["real"],
@@ -2267,8 +2274,7 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
     result_fp = None
     if pred_store is not None:
         de_fps = []
-        has_de = any(CATALOG[n].kind == "de" for n in names)
-        if has_de:
+        if has_de or needs_real_de:
             from .de import load_de_table
             # Fingerprint each SUPPLIED DE side independently so its content enters the
             # result key even when only one side is supplied (the other is computed):
@@ -2290,7 +2296,6 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
         # metric is requested AND at least one side is computed, not supplied. This is a
         # REQUEST-SHAPE predicate, not "the engine executed" -- a DE-table cache hit skips
         # execution and is still True, because the backend produced the table being served.
-        de_backend_used = has_de and (de_real is None or de_pred is None)
         result_fp = result_fingerprint(
             real_fp=real_fp, pred_fp=pred_fp, de_fps=de_fps,
             config_digest=_result_config_digest(
@@ -2369,6 +2374,11 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
                 "match the anndata perturbations (excluding the control)"
             )
 
+    if needs_real_de and de_real is None:
+        de_real = _compute_de_side(
+            real_ad, cfg=cfg, fp=real_fp, store=real_store, side="real",
+        )
+
     genes = np.asarray(pred_ad.var.index.values, dtype=str)
     norms = names_norms  # computed above (before the DE section) for the early pred pseudobulk
     # Cell metrics only (#395, `cell_only` above): they validate every block of cells they read
@@ -2408,7 +2418,7 @@ def _run_metrics(pred_ad, real_ad, *, cfg, de_pred, de_real, real_store, pred_st
                                          comparator=comparator,
                                          pred_moments=pred_moments,
                                          real_moments=real_moments,
-                                         driver="compute_metrics (in-memory)"))
+                                         driver="compute_metrics (in-memory)", de_real=de_real))
     # Raw-cell metrics (the cell_cov_* family): random row access to BOTH sides' single
     # cells, which the pseudobulk dispatch above cannot supply. Only this in-memory driver
     # carries cells. A BACKED side is read row block by row block where that is cheap (see
@@ -2905,6 +2915,8 @@ def precompute_cache(adata_or_path, *, side: str, config: EvalConfig, de=None,
 
     adata = load_anndata(adata_or_path, backed=isinstance(adata_or_path, (str, os.PathLike)))
     try:
+        if cfg.pert_col in adata.obs.columns:
+            require_pert_labels(adata.obs[cfg.pert_col], cfg.pert_col, side=side)
         eff = _effective_input_type(adata, cfg, side=side)
         if cfg.target_sum is None and eff == "counts":
             # #267: the refusal was unconditional, and for side='real' it was too strong. The

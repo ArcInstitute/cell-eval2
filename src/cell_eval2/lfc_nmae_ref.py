@@ -65,6 +65,7 @@ from .de import (
     prep_de_side,
     resolve_target_genes,
 )
+from .io import require_pert_labels
 from .run import _compute_de_side, _resolve_config, _resolve_target_sum_from_control
 
 logger = logging.getLogger(__name__)
@@ -370,20 +371,8 @@ def compute_lfc_nmae_reference(
     # waves them through. Calling the same `groupby(..., observed=True).indices` makes the
     # precheck and the split the same partition, mixed dtypes included -- the same "one
     # definition, not two" reason `catalog.is_decisive` exists. NULLS are NOT included by
-    # either (both default to dropna=True), which is why they are rejected separately above.
-    # NULLS FIRST: `groupby(...).indices` defaults to dropna=True, so a null-labelled cell
-    # is invisible to BOTH this precheck and `_disjoint_halves` -- while the DE path
-    # stringifies labels (prep.py, deseq2_de.py), turning them into a real target named
-    # "nan". That target would then sit in the full-real gate with no group in either half:
-    # exactly the mismatch the precondition exists to prevent, entering through a door the
-    # precondition cannot see.
-    if real_ad.obs[cfg.pert_col].isna().any():
-        n_null = int(real_ad.obs[cfg.pert_col].isna().sum())
-        raise ValueError(
-            f"{n_null} cell(s) have a null {cfg.pert_col!r}; the lfc_nmae reference cannot "
-            "split a group it cannot see, and the DE backends stringify the label into a "
-            "target regardless. Drop or relabel those cells first."
-        )
+    # either (both default to dropna=True), which is why the check below rejects them first.
+    require_pert_labels(real_ad.obs[cfg.pert_col], cfg.pert_col, side="real")
     groups = real_ad.obs.groupby(cfg.pert_col, observed=True).indices
     thin = sorted(str(k) for k, idx in groups.items() if len(idx) <= 1)
     if thin:

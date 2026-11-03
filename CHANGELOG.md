@@ -4,6 +4,80 @@ All notable changes to cell_eval2. Releases before 0.0.4 (`v0.0.2`, `v0.0.3`) pr
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-02
+
+### Added
+
+- **`delta_pearson_degs`, Pearson delta on true DEGs (#422).** An opt-in v2 metric, in no
+  profile: per perturbation, the Pearson correlation of the predicted and real
+  perturbation-minus-control deltas over the genes the reference DE table calls significant
+  (`de.p_adj_threshold`, `de.min_abs_log2fc`, `de.nan_lfc_policy`), the perturbation's own target
+  excluded. The prediction's DE calls never choose the genes. It uses the run's expression
+  comparator and `control_source`. A perturbation is scored only with at least 10 such genes
+  (`real_gate.DEFAULT_MIN_GATE_SIZE`) and a non-constant, finite real delta; otherwise it is NaN
+  and leaves the mean. A constant or non-finite predicted delta scores −1. `compute_metrics`
+  computes only the real DE table when no DE metric is selected, or takes one through
+  `de_real`; a table none of whose features is a measured gene raises. `score_cellstream`,
+  `score_h5ad_manifest`, `score_rowstore` and `score_streaming_cell` reuse the reference DE
+  table; `score_streaming` (`.shad`) refuses the metric. `metrics_version` becomes 2.
+
+### Changed
+
+- **A missing perturbation label is rejected with a `ValueError` at the entry points that read
+  a perturbation column.** A cell whose perturbation label is `None`, `NaN`, `pd.NA` or a
+  categorical NaN now raises before the input is scored, and the message names the column, the
+  side and the number of cells. An empty string is still a label, but an empty field in a row
+  store's `obs.csv` can be read as missing, so a row store with an empty label can be rejected.
+  Where one call scores several artifacts (`score_h5ad_manifest`, `score_rowstore`), each
+  artifact is checked before its own scoring starts. The check applies to these functions:
+  `compute_metrics`, `precompute_cache`, `score_cellstream`, `score_h5ad_manifest`,
+  `score_rowstore`, `score_streaming_cell`, `CellBatchSource`,
+  `build_generic_baseline` (and the other baseline builders), `generic_response_profile`,
+  `lock_matrix_space`, `build_run_meta`, `cached_anchor`, `compute_ceiling`,
+  `compute_lfc_nmae_reference` (same error as before, one shared message),
+  `compute_replicate_anchor`, and `build_reference`, `build_reference_streaming`,
+  `build_pred_control_reference` and `score_piece` in `partition_inmem`.
+  The exported metric functions that take label arrays directly (`cell_eval2.metrics.mae`,
+  `discrimination_score` and the others) do not check: they still score a missing label as a
+  perturbation named `"nan"`, `"<NA>"` or `"None"`, depending on its dtype. `score_streaming`
+  does not check the labels of a packed `.shad` archive.
+  Before, the result depended on the entry point and the pandas version. Most paths scored such
+  cells as a perturbation named `"None"`, `"nan"` or `"<NA>"`, and `compute_ceiling` dropped them
+  without a message. On pandas 3, `build_reference` and `score_piece` stopped with
+  `TypeError: '<' not supported between instances of 'float' and 'str'`. Inputs without missing
+  labels score as before.
+
+### Fixed
+
+- **The partitioned drivers rebuild `de_wilcoxon_nsig_spearman` only when it is selected
+  (part of #416).** `score_cellstream`, `score_h5ad_manifest` and `score_rowstore` always
+  rebuilt it from the two `de_wilcoxon_nsig_counts_*` metrics, so a selection without both
+  (`vcc`, `pds`, `["expr_mae"]`) failed with `ValueError` after the whole DE run. Such
+  selections now score. A selection with the counts but not the Spearman (`minimal`) no longer
+  gains unselected Spearman rows, which matches `compute_metrics`. Selecting the Spearman still
+  requires both count metrics.
+
+- **`score_cellstream` writes its reference cache when an obs or var string column has missing
+  values.** The `real_control.h5ad` and `pred_control.h5ad` writes accept a string column that is
+  missing on every row of a control block; they raised
+  `TypeError: Can't implicitly convert non-string objects to strings`. Missing values in a string
+  column (pandas `string`, Arrow string, or `object` holding only `str`) are written as `""`,
+  also when the column is only partly missing. The perturbation column, columns without missing
+  values, categorical columns and the obs and var index are unchanged. No metric value changes.
+
+- **The baseline's `save_pred` file and the `real_control.h5ad` of `build_reference` follow the
+  same rule.** `build_generic_baseline(save_pred=...)` applies the `score_cellstream` sanitizer
+  to the whole prediction it writes, and `build_reference(..., control_format="h5ad")` to the
+  control block it writes.
+  The `obs_names` and `var_names` index is written as given. An `object` string column that was
+  missing on every row raised `TypeError` in both outputs; it now writes. Every missing value in
+  an obs or var string column is written as `""`, also in a partly missing column. An all-missing
+  nullable `string` column was written before, as categorical NaN; it is now written as
+  categorical `""`. A clean nullable `string` column now reads back with equal values as `str`
+  (pandas 3.1.0; it read back as `string`) or `object` (pandas 2.3.3; both outputs raised
+  `RuntimeError`). `build_reference(..., control_format="shad")` is unchanged. No metric value
+  changes.
+
 ## [0.20.0] — 2026-10-23
 
 ### Added

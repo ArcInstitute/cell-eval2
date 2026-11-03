@@ -88,6 +88,7 @@
     "delta_mae",
     "delta_mse",
     "delta_pearson",
+    "delta_pearson_degs",
     "expr_distance_unbiased",
     "expr_mae",
     "expr_mse",
@@ -804,6 +805,14 @@
         "tolerance": "continuous"
       }
     },
+    "delta_pearson_degs": {
+      "1": {
+        "axis": "perturbation",
+        "direction": "higher",
+        "statistic": "mean",
+        "tolerance": "continuous"
+      }
+    },
     "expr_distance_unbiased": {
       "1": {
         "axis": "perturbation",
@@ -885,5 +894,5 @@
       }
     }
   },
-  "metrics_version": 1
+  "metrics_version": 2
 }

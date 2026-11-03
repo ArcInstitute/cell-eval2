@@ -180,3 +180,66 @@ def gate_v2(names, prep, **cfg):
     for r in rows:
         out.setdefault(r["metric"], {})[r["perturbation"]] = r["value"]
     return out
+
+
+# Label column kinds that a missing perturbation label can arrive in.
+MISSING_LABEL_KINDS = ("object_none", "object_nan", "string_na", "str", "categorical")
+
+
+def make_labels(kind, labels, missing_at, *, index=None):
+    """A label Series of ``kind`` that holds a missing value at each position in ``missing_at``.
+
+    Asserts the realised dtype, so a kind that pandas or anndata silently converts to another
+    fails here and not as a vacuous pass in the test that uses it. ``str`` is
+    ``pd.StringDtype(storage="python", na_value=np.nan)``: a pandas 3 string dtype,
+    spelled so that pandas 2.3 builds the same dtype.
+    """
+    import numpy as np
+    import pandas as pd
+
+    values = [None if i in set(missing_at) else v for i, v in enumerate(labels)]
+    if kind == "object_none":
+        s = pd.Series(values, index=index, dtype=object)
+        assert s.dtype == object and all(values[i] is None for i in missing_at)
+    elif kind == "object_nan":
+        s = pd.Series([np.nan if v is None else v for v in values], index=index, dtype=object)
+        assert s.dtype == object and all(isinstance(s.iloc[i], float) for i in missing_at)
+    elif kind == "string_na":
+        s = pd.Series(pd.array(values, dtype="string"), index=index)
+        assert isinstance(s.dtype, pd.StringDtype) and s.dtype.na_value is pd.NA
+        assert all(s.iloc[i] is pd.NA for i in missing_at)
+    elif kind == "str":
+        import pytest
+
+        if tuple(int(v) for v in pd.__version__.split(".")[:2]) < (2, 3):
+            pytest.skip("pd.StringDtype(na_value=...) needs pandas >= 2.3")
+        dtype = pd.StringDtype(storage="python", na_value=np.nan)
+        s = pd.Series(values, index=index, dtype=dtype)
+        assert s.dtype == dtype
+    elif kind == "categorical":
+        s = pd.Series(pd.Categorical(values), index=index)
+        assert isinstance(s.dtype, pd.CategoricalDtype)
+    else:
+        raise ValueError(f"unknown label kind {kind!r}")
+    assert int(s.isna().sum()) == len(set(missing_at))
+    return s
+
+
+def set_labels(adata, column, kind, missing_at):
+    """Replace ``adata.obs[column]`` by a ``kind`` column with missing values; return ``adata``."""
+    labels = adata.obs[column].astype(object).tolist()
+    new = make_labels(kind, labels, missing_at, index=adata.obs.index)
+    adata.obs[column] = new
+    assert adata.obs[column].dtype == new.dtype, (kind, adata.obs[column].dtype)
+    return adata
+
+
+def assert_missing_labels_error(excinfo, *, n_missing, n_cells, column, side, other_side=None):
+    """The ``require_pert_labels`` message: the count, the column and the side, and for a
+    one-sided failure not the other side's name. Returns the message."""
+    msg = str(excinfo.value)
+    assert f"{n_missing} of {n_cells} cells in {side} have a missing (null) perturbation label" in msg
+    assert repr(column) in msg
+    if other_side is not None:
+        assert other_side not in msg
+    return msg

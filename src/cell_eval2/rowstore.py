@@ -26,6 +26,7 @@ import polars as pl
 from ._sparse import SPARSE_DENSITY_MAX, estimate_density, scaled_log1p_csr, to_csr_f32
 from . import norm as _norm
 from .config import EvalConfig
+from .io import require_pert_labels
 from .norm import resolve_target_sum
 
 
@@ -135,8 +136,11 @@ class RowStoreBatchSource:
             self._dat_path, dtype=artifact.dtype, n_rows=artifact.n_rows, n_genes=self.n_genes)
         self.use_sparse = self.density < SPARSE_DENSITY_MAX
         self._var_names = np.load(artifact.var_names_path, allow_pickle=True).astype(str)
-        labels = (pl.read_csv(artifact.obs_path, columns=["perturbation"])["perturbation"]
-                  .to_numpy().astype(str))
+        raw_labels = (pl.read_csv(artifact.obs_path, columns=["perturbation"])["perturbation"]
+                      .to_numpy())
+        require_pert_labels(raw_labels, "perturbation",
+                            side=f"{side} row store (artifact {artifact.artifact_id})")
+        labels = raw_labels.astype(str)
         if labels.shape[0] != artifact.n_rows:
             raise ValueError(
                 f"artifact {artifact.artifact_id}: obs has {labels.shape[0]} rows, "
@@ -221,7 +225,7 @@ def score_rowstore(staging_dir, *, config=None, mem_budget, output_space="scaled
     from .partition import aggregate_partials
     from .partition_inmem import (_RefBundle, _build_pred_control_reference_core,
                                   _build_reference_streaming_core, score_piece)
-    from .h5ad_manifest import _assemble_score_result, _nsig_names
+    from .h5ad_manifest import _assemble_score_result, _nsig_names, _nsig_spearman_requested
 
     cfg = config if config is not None else EvalConfig.from_preset("cell-eval-0.7.6")
     if cfg.pert_col == "target":                       # row-store obs uses "perturbation"
@@ -276,7 +280,8 @@ def score_rowstore(staging_dir, *, config=None, mem_budget, output_space="scaled
                 del bundle
             nsig_metric, nsig_real, nsig_pred = _nsig_names(art_cfg)
             full, _agg = aggregate_partials(
-                parts_dir, reduce_nsig_spearman=True, nsig_spearman_metric=nsig_metric,
+                parts_dir, reduce_nsig_spearman=_nsig_spearman_requested(art_cfg, nsig_metric),
+                nsig_spearman_metric=nsig_metric,
                 nsig_real_metric=nsig_real, nsig_pred_metric=nsig_pred)
         per_pert_frames.append(full.with_columns(
             pl.lit(art.dataset).alias("dataset"),

@@ -1,6 +1,6 @@
 [project]
 name = "cell-eval2"
-version = "0.20.0"
+version = "0.21.0"
 description = "Clean, streamlined, GPU-accelerated reimplementation of cell-eval"
 readme = "README.md"
 requires-python = ">=3.11"

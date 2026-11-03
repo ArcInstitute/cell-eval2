@@ -34,7 +34,7 @@ from .partition import (PARTIAL_SEMANTICS_KEY, result_semantics, select_subset,
 from .run import (_moment_normalizations, _needed_normalizations,
                   _reject_cell_metrics, _resolve_config, dispatch_anndata_metrics,
                   dispatch_de_metrics, effective_normalization)
-from .io import validate_gene_axis
+from .io import require_pert_labels, validate_gene_axis
 from .stream import shad_fingerprint, shad_metadata, shad_var_names
 from .streaming_bulk import streaming_pseudobulk
 
@@ -81,6 +81,15 @@ def score_streaming(pred, real, *, config, subset=None, fraction=None, index=Non
     # Before any archive read: with target_sum=None the lines below read the real control pool,
     # which a refused selection must not pay for (Copilot, #395).
     _reject_cell_metrics(names, driver="score_streaming (shard-stream)")
+    # The metrics that select their genes by the reference DE table are not wired into this
+    # path, so they are refused at the same point, before any archive read.
+    real_de_names = sorted(n for n in names if CATALOG[n].needs_real_de)
+    if real_de_names:
+        raise NotImplementedError(
+            f"metric(s) {real_de_names} select their genes by the reference DE table, which "
+            "score_streaming (the .shad shard-stream path) does not supply. Use compute_metrics, "
+            "score_cellstream or score_streaming_cell, or deselect these metrics."
+        )
     effective_types = {
         "pred": _shard_effective_input_type(pred, cfg, side="pred"),
         "real": _shard_effective_input_type(real, cfg, side="real"),
@@ -561,7 +570,12 @@ def score_streaming_cell(pred, real, *, config, subset=None, fraction=None, inde
     pred_store = open_cell_store(pred)
     real_store = None
     try:
+        # A column absent from obs is reported by validate_cell_pair (group_by mismatch).
+        if cfg.pert_col in pred_store.obs.columns:
+            require_pert_labels(pred_store.obs[cfg.pert_col], cfg.pert_col, side="pred")
         real_store = open_cell_store(real)
+        if cfg.pert_col in real_store.obs.columns:
+            require_pert_labels(real_store.obs[cfg.pert_col], cfg.pert_col, side="real")
         # #266/#182, the cell-layout half. The gate above keys on cfg.input_type -- the DECLARED
         # value -- so a config declaring counts over lognorm archives walked straight through it
         # and the values were silently mis-normalized, which is exactly what that gate's own
@@ -600,7 +614,15 @@ def score_streaming_cell(pred, real, *, config, subset=None, fraction=None, inde
         rows: list[dict] = []
 
         # --- DE metrics: gpudge streaming (per-cell MWU), both sides ---
-        if de_names:
+        real_de = None
+        needs_real_de = any(CATALOG[n].needs_real_de for n in names)
+        if needs_real_de:
+            de_rows, real_de = _score_streaming_cell_de(
+                pred_store, real_store, cfg=cfg, de_names=de_names, chosen=chosen,
+                return_real_de=True,
+            )
+            rows.extend(de_rows)
+        elif de_names:
             rows.extend(_score_streaming_cell_de(
                 pred_store, real_store, cfg=cfg, de_names=de_names, chosen=chosen))
 
@@ -678,7 +700,7 @@ def score_streaming_cell(pred, real, *, config, subset=None, fraction=None, inde
                 comparator=comparator,
                 pred_moments=pred_moments, real_moments=real_moments,
                 pred_bulks_full=pred_bulks_full,
-                driver="score_streaming_cell (cell-stream)") if r["perturbation"] in chosen)
+                driver="score_streaming_cell (cell-stream)", de_real=real_de) if r["perturbation"] in chosen)
             logger.info("cell-streaming pred median UMI/cell = %s", median_umi)
 
         df = pl.DataFrame(rows, schema=_TIDY_SCHEMA)
@@ -705,7 +727,8 @@ def score_streaming_cell(pred, real, *, config, subset=None, fraction=None, inde
             real_store.close()
 
 
-def _score_streaming_cell_de(pred_store, real_store, *, cfg, de_names, chosen):
+def _score_streaming_cell_de(pred_store, real_store, *, cfg, de_names, chosen,
+                             return_real_de=False):
     """Build pred/real gpudge DE tables off the cell archives, restrict to ``chosen``,
     assemble, and dispatch the DE metrics. Mirrors :func:`_score_streaming_de`: the real
     side ranks vs its own reference pool (Mode 1); the v2 pred side
@@ -736,6 +759,9 @@ def _score_streaming_cell_de(pred_store, real_store, *, cfg, de_names, chosen):
     # (Gemini PR #127 plan review).
     real_ref = cell_source.cell_reference(real_store, gather_threads=cfg.gather_threads)
     real_de = de_table(real_store, real_ref, store_meta=meta)   # Mode 1
+    real_de_full = real_de
+    if not de_names:
+        return ([], real_de_full) if return_real_de else []
     if cfg.control_source == "real":
         pred_ref = real_ref                                     # real's control pool (Mode 2)
     else:
@@ -759,4 +785,5 @@ def _score_streaming_cell_de(pred_store, real_store, *, cfg, de_names, chosen):
         p_adj_threshold=cfg.de.p_adj_threshold, nan_lfc_policy=cfg.de.nan_lfc_policy,
         min_abs_log2fc=cfg.de.min_abs_log2fc, target_resolution=resolution,
     )
-    return dispatch_de_metrics(de_names, prepared, cfg)
+    rows = dispatch_de_metrics(de_names, prepared, cfg)
+    return (rows, real_de_full) if return_real_de else rows

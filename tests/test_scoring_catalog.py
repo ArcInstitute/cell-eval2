@@ -8,7 +8,7 @@ DIRECTIONLESS = {"de_wilcoxon_nsig_counts_real", "de_wilcoxon_nsig_counts_pred",
 
 
 def test_every_spec_has_a_scoring_policy():
-    assert len(CATALOG) == 98          # 13 anndata + 41 per DE family x 2
+    assert len(CATALOG) == 99          # 14 anndata + 41 per DE family x 2
                                        #   + 2 cell_cov (#386 B4) + 1 cell_cov_ccc
     assert all(isinstance(s.scoring, Scoring) for s in CATALOG.values())
 
@@ -42,7 +42,7 @@ def test_enrolment_implies_a_direction_but_not_conversely():
     """Every scored metric has a direction. Two states occupied today, both pinned by name
     below so neither can silently become the other:
 
-      * scored, with a direction        -- 87 entries
+      * scored, with a direction        -- 88 entries
       * unscored because DIRECTIONLESS  -- the four `de_*_nsig_counts_*`, the three
                                            diagnostic components of the derived metric, and
                                            the real-mass diagnostic
@@ -61,7 +61,7 @@ def test_enrolment_implies_a_direction_but_not_conversely():
     mathematics, and re-collapsing them here would undo that.
     """
     scored = {n for n, s in CATALOG.items() if s.scoring.scored}
-    assert len(scored) == 87
+    assert len(scored) == 88
     # `_UNSCORED` is the four DE directionless entries: it is reused below against a
     # DE-only `former_none` set, where a fifth member would be wrong.
     assert set(CATALOG) - scored == _UNSCORED | _ANNDATA_DIAGNOSTICS | _CELL_COV_DIAGNOSTICS

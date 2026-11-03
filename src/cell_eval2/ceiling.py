@@ -77,7 +77,7 @@ import polars as pl
 
 from .catalog import _NAME_TO_CANONICAL, resolve_metrics
 from .config import EvalConfig
-from .io import load_anndata
+from .io import load_anndata, require_pert_labels
 from .run import (
     _TIDY_SCHEMA,
     _resolve_config,
@@ -247,6 +247,7 @@ def compute_ceiling(
     """
     cfg = _resolve_config(config, overrides)
     real_ad = load_anndata(real, backed=False)  # need it in memory to split
+    require_pert_labels(real_ad.obs[cfg.pert_col], cfg.pert_col, side="real")
 
     available, _missing = resolve_metrics(cfg.metrics, version=cfg.version)
     deseq2 = getattr(cfg.de, "backend", None) == "deseq2"

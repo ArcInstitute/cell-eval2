@@ -788,7 +788,7 @@ enrolment — most of them are scored.
 | field | default | meaning |
 |---|---|---|
 | `metrics` | `"full"` | profile name or explicit list of metric names |
-| `pert_col` | `"target"` | obs column with the perturbation label (this dataset uses `target_gene`) |
+| `pert_col` | `"target"` | obs column with the perturbation label (this dataset uses `target_gene`); every cell needs a label, and a missing one raises `ValueError` (`score_streaming` does not check the labels of a packed `.shad` archive) |
 | `control` | `"non-targeting"` | control label within `pert_col` |
 | `version` | `"v2"` | output metric-name convention + provenance stamp |
 | `control_source` | `"real"` | which side supplies the control (v1 uses `"pred"`) |

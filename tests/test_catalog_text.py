@@ -6,7 +6,7 @@ _K = (50, 100, 200, 500)
 FAMILY_MEMBERS = {   # design §7, verbatim
     "expr": {"expr_mae", "expr_mse", "expr_mse_unbiased", "expr_mse_unbiased_capped",
              "expr_distance_unbiased", "expr_real_mass_ratio", "expr_mse_unbiased_capped_norm"},
-    "delta": {"delta_mae", "delta_mse", "delta_pearson"},
+    "delta": {"delta_mae", "delta_mse", "delta_pearson", "delta_pearson_degs"},
     "pds": {"pds_l1", "pds_l2", "pds_cosine"},
     "overlap": {"overlap", "precision", *(f"overlap_top{k}" for k in _K),
                 *(f"precision_top{k}" for k in _K)},
@@ -26,7 +26,7 @@ FAMILY_MEMBERS = {   # design §7, verbatim
 
 def test_every_catalog_entry_has_one_row_and_every_row_an_entry():
     assert {text_key(n) for n in CATALOG} == set(METRIC_TEXT)
-    assert len(METRIC_TEXT) == 57
+    assert len(METRIC_TEXT) == 58
 
 
 def test_both_de_families_share_their_row():

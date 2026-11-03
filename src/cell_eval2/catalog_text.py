@@ -128,6 +128,13 @@ METRIC_TEXT: dict[str, MetricText] = {
         min=-1.0,
         max=1.0,
     ),
+    'delta_pearson_degs': MetricText(
+        display_name='Effect correlation on true DEGs',
+        description="Pearson correlation between the predicted and real effects of the perturbation (pseudobulk minus control) over the real significant DE genes except the perturbation's own; no value when the reference has fewer than 10 such genes or the real effect does not vary across them.",
+        family='delta',
+        min=-1.0,
+        max=1.0,
+    ),
     'pds_l1': MetricText(
         display_name='Discrimination (L1)',
         description="One minus the normalized rank of the real perturbation's effect among all real effects by L1 distance to the predicted effect, over all genes except the target genes the discrimination settings exclude (by default, every target gene of the panel); 1 means the prediction is closest to its own perturbation.",

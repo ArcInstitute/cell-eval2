@@ -22,6 +22,7 @@ import polars as pl
 
 from . import norm as _norm
 from .config import EvalConfig
+from .io import require_pert_labels
 from .run import _close_backed
 
 
@@ -158,6 +159,7 @@ def read_group_block(h5ad_abs, *, pert_col, labels) -> ad.AnnData:
     """In-memory AnnData of rows whose obs[pert_col] is in `labels`."""
     backed = ad.read_h5ad(h5ad_abs, backed="r")
     try:
+        require_pert_labels(backed.obs[pert_col], pert_col, side=os.fspath(h5ad_abs))
         obs_labels = backed.obs[pert_col].to_numpy().astype(str)
         idx = np.flatnonzero(np.isin(obs_labels, list(map(str, labels))))
         if idx.size == 0:
@@ -180,6 +182,7 @@ def iter_h5ad_pert_batches(h5ad_abs, *, pert_col, control,
     call was O(batches * N) disk I/O + string parsing -- a bottleneck at scale)."""
     backed = ad.read_h5ad(h5ad_abs, backed="r")
     try:
+        require_pert_labels(backed.obs[pert_col], pert_col, side=os.fspath(h5ad_abs))
         obs_labels = backed.obs[pert_col].to_numpy().astype(str)
         n_genes = int(backed.n_vars)
         itemsize = np.dtype(getattr(backed.X, "dtype", np.float32)).itemsize
@@ -257,6 +260,21 @@ def _nsig_names(cfg):
     return (out("de_wilcoxon_nsig_spearman"),
             out("de_wilcoxon_nsig_counts_real"),
             out("de_wilcoxon_nsig_counts_pred"))
+
+
+def _nsig_spearman_requested(cfg, nsig_metric: str) -> bool:
+    """Whether a partitioned driver rebuilds ``nsig_metric`` from its partials (#416).
+
+    ``score_piece`` cannot score the cross-perturbation Spearman, so ``aggregate_partials``
+    rebuilds it from the two count metrics and raises when they are absent. Rebuilding it
+    unconditionally made every selection without both counts (``vcc``, ``pds``,
+    ``["expr_mae"]``) fail after the whole DE run, and added unselected Spearman rows to one
+    that has them (``minimal``). A selection that does contain it still needs both counts.
+    Shared by ``score_cellstream``, ``score_h5ad_manifest`` and ``score_rowstore``.
+    """
+    from .run import metric_output_names
+
+    return nsig_metric in metric_output_names(cfg)
 
 
 def _assemble_score_result(per_pert_frames) -> ScoreResult:
@@ -425,7 +443,7 @@ def score_h5ad_manifest(manifest, *, config=None, mem_budget, outdir=None) -> Sc
                 del bundle
             nsig_metric, nsig_real, nsig_pred = _nsig_names(cfg)
             full, _agg = aggregate_partials(
-                parts_dir, reduce_nsig_spearman=True,
+                parts_dir, reduce_nsig_spearman=_nsig_spearman_requested(cfg, nsig_metric),
                 nsig_spearman_metric=nsig_metric,
                 nsig_real_metric=nsig_real, nsig_pred_metric=nsig_pred)
         per_pert_frames.append(full.with_columns(

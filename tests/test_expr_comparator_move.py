@@ -38,6 +38,7 @@ EVERY_ANNDATA_METRIC = [
     "delta_mae",
     "delta_mse",
     "delta_pearson",
+    "delta_pearson_degs",
     "expr_distance_unbiased",
     "expr_mae",
     "expr_mse",
@@ -52,7 +53,7 @@ EVERY_ANNDATA_METRIC = [
 
 
 def test_every_anndata_metric_declares_the_comparator_token():
-    """All 13 anndata metrics must positively declare the comparator token."""
+    """All 14 anndata metrics must positively declare the comparator token."""
     anndata = sorted(n for n, spec in CATALOG.items() if spec.kind == "anndata")
     assert anndata == sorted(EVERY_ANNDATA_METRIC)
     assert [n for n in anndata if CATALOG[n].normalization != EXPR_COMPARATOR] == []

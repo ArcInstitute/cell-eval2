@@ -46,8 +46,8 @@ def test_tolerance_must_be_a_known_class():
         dataclasses.replace(CATALOG["expr_mae"], tolerance="loose")
 
 
-def test_counter_starts_at_one():
-    assert METRICS_VERSION == 1
+def test_counter_includes_true_degs_metric():
+    assert METRICS_VERSION == 2
 
 
 def test_scalar_metrics_are_the_nsig_spearman_pair():
@@ -78,8 +78,8 @@ def test_tolerance_change_requires_a_metric_version_bump():
 def test_metrics_version_cannot_decrease_with_unchanged_identities():
     current = metric_identity()
     ledger = extend_ledger(None, current)
-    ledger["metrics_version"] = 2
-    message = "metrics_version decreased: 2 -> 1"
+    ledger["metrics_version"] = METRICS_VERSION + 1
+    message = f"metrics_version decreased: {METRICS_VERSION + 1} -> {METRICS_VERSION}"
     assert identity_violations(ledger, current) == [message]
     with pytest.raises(ValueError, match=message):
         extend_ledger(ledger, current)
@@ -93,7 +93,7 @@ def _set(d, k, v):
     (lambda s, c: c["metrics"].pop("pds_l1"), "metrics_version bump"),
     (lambda s, c: _set(c["metrics"], "pds_new", dict(c["metrics"]["pds_l1"])), "metrics_version bump"),
     (lambda s, c: _set(c["metrics"]["pds_l1"], "version", 2), "metrics_version bump"),
-    (lambda s, c: (_set(c["metrics"]["pds_l1"], "version", 2), _set(c, "metrics_version", 2)), None),
+    (lambda s, c: (_set(c["metrics"]["pds_l1"], "version", 2), _set(c, "metrics_version", METRICS_VERSION + 1)), None),
     (lambda s, c: _set(c["metrics"]["pds_l1"], "statistic", "median"), "without a version bump"),
     (lambda s, c: _set(c["metrics"]["pds_l1"], "axis", None), "without a version bump"),
     (lambda s, c: _set(c["metrics"]["pds_l1"], "axis", "context"), "without a version bump"),
