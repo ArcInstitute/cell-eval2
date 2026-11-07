@@ -978,7 +978,8 @@ def _package_provenance(name: str) -> dict | None:
 
 def _environment_record(resolved_de_backend: str | None) -> dict:
     """WHAT COMPUTED THE NUMBERS: the resolved DE engine plus the numeric stack, each as
-    ``{"version", "provenance"}``.
+    ``{"version", "provenance"}``. ``settings.de.engine`` records the engine's name only; its
+    version and provenance are recorded here.
 
     Nested under one new top-level key on purpose. A single key cannot collide with a
     compared field name -- ``check_submission`` iterates ``SUBMISSION_PEERS`` and

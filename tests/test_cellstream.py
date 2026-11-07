@@ -743,8 +743,9 @@ def test_resolve_input_type_cell_plumbs_n_threads(monkeypatch):
 def test_score_cellstream_wires_gather_threads_to_all_three_sources(monkeypatch):
     """score_cellstream builds THREE CellBatchSources (real reference, pred-control with
     control_source='pred', pred batches) and must hand cfg.gather_threads to every one, plus to
-    the input-type peek. cellstream-free and CPU-only: the store, the GPU/gpudge partition guard,
-    the two core builders and the aggregator are all stubbed.
+    the pred side's input-type peek under autodetect_input_type. cellstream-free and CPU-only:
+    the store, the GPU/gpudge partition guard, the two core builders and the aggregator are all
+    stubbed.
 
     NOTE on the monkeypatch targets: score_cellstream imports _require_partition_config /
     _build_*_core / aggregate_partials INSIDE its own body, so those `from X import Y` statements
@@ -804,13 +805,13 @@ def test_score_cellstream_wires_gather_threads_to_all_three_sources(monkeypatch)
     # i.e. these wiring guards were themselves running against a control that did not exist,
     # which passed only because everything downstream of the resolution is stubbed out.
     cfg = EvalConfig(pert_col="perturbation", control="control", gather_threads=6,
-                     control_source="pred", metrics=full_minus_moments())
+                     control_source="pred", metrics=full_minus_moments(),
+                     autodetect_input_type=True)
     with pytest.raises(_Done):
         cs.score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG)
 
-    # Comparator resolution inspects BOTH archives independently; a one-sided peek would miss
-    # an asymmetric counts/lognorm pair and can be passed by reading the prediction twice.
-    assert peeked == [6, 6]
+    # Only the pred side is peeked; the real side takes the declared type.
+    assert peeked == [6]
     assert seen == [6, 6, 6], f"expected all three CellBatchSources wired, got {seen}"
 
 
@@ -1865,8 +1866,9 @@ def test_cell_archive_input_type_strict_is_the_agreement_check_the_consumer_want
 
 def test_cell_archive_input_type_strict_is_not_vacuous_under_autodetect_off(tmp_path):
     """strict= must be a real check, not a tautology. The peek autodetects regardless of
-    cfg.autodetect_input_type (every cell/shard driver does -- the accumulators take no
-    input_type), so the resolved value comes from the DATA even when the config says otherwise."""
+    cfg.autodetect_input_type (as the accumulator drivers score_streaming and score_streaming_cell
+    do -- the accumulators take no input_type), so the resolved value comes from the DATA even when
+    the config says otherwise."""
     from cell_eval2 import cell_archive_input_type
     from cell_eval2.config import EvalConfig
     ln, _ = _write_cell(tmp_path, "ln", 3, lognorm=True)
@@ -1908,12 +1910,44 @@ def _sentinel_ref(*a, **k):
     raise _Built()
 
 
+_NORM_FRACTIONAL = "declared input_type='counts' but values are fractional"
+
+
+def _whole(text):
+    """A ``match=`` pattern for exactly ``text``."""
+    import re
+    return rf"^{re.escape(text)}$"
+
+
+def _pred_refusal(autodetect=False, declare_only=False, cell=False):
+    """The pred-side refusal. Under `autodetect_input_type` the shared-`input_type` hint is
+    dropped; `declare_only` is the hint where autodetect would refuse again (`allow_discrete`,
+    or DE metrics under `control_source="real"`) and so is not suggested; `cell` is the hint with
+    cell metrics selected, which says to deselect them."""
+    from cell_eval2.partition_inmem import _CELL_COUNTS_FIX, _PIECE_FRACTIONAL_FIX, _PRED_TYPE_FIX
+    if autodetect:
+        hint = _PIECE_FRACTIONAL_FIX
+    elif cell:
+        hint = f"{_PIECE_FRACTIONAL_FIX} {_CELL_COUNTS_FIX}"
+    elif declare_only:
+        hint = f"{_PIECE_FRACTIONAL_FIX} {_PRED_TYPE_FIX}."
+    else:
+        hint = f"{_PIECE_FRACTIONAL_FIX} {_PRED_TYPE_FIX}; otherwise set autodetect_input_type=True."
+    return f"{_NORM_FRACTIONAL} (pred side). {hint}"
+
+
+def _real_refusal(cell=False):
+    from cell_eval2.partition_inmem import _CELL_COUNTS_FIX, _REAL_FRACTIONAL_FIX
+    return f"{_NORM_FRACTIONAL} (real side). {_CELL_COUNTS_FIX if cell else _REAL_FRACTIONAL_FIX}"
+
+
 def _stub_cell_pass_run(monkeypatch, *, itypes=("counts", "counts"), n_vars=5, store=None,
                         stores=None, helper=None, calls=None):
     """Stub everything score_cellstream calls except the split, the fail-fast checks, the cell
     pass and the result assembly; return a dict recording what each stub was handed.
-    ``itypes`` is (real, pred), in the order score_cellstream resolves them; ``None`` keeps the
-    real resolver, which then reads ``store``'s values. ``stores`` maps each archive path to the
+    ``itypes`` is (real, pred), returned by ``effective_input_type_cell`` for each side;
+    ``None`` keeps the real rule, which reads ``store``'s values only under
+    ``autodetect_input_type``. ``stores`` maps each archive path to the
     store a ``CellStoreSource`` opens there (default: a copy of ``store`` per path);
     ``rec["archive_opens"]`` records each ``(path, store)`` opened. ``calls``, when given,
     receives "release" and "helper" in the order the pool release and the default helper run."""
@@ -1944,8 +1978,8 @@ def _stub_cell_pass_run(monkeypatch, *, itypes=("counts", "counts"), n_vars=5, s
         return stores[path]
     monkeypatch.setattr(archive, "open_cell_store", _open_archive)
     if itypes is not None:
-        seq = iter(itypes)
-        monkeypatch.setattr(cs, "_resolve_input_type_cell", lambda st, cfg, **k: next(seq))
+        by_side = dict(zip(("real", "pred"), itypes))
+        monkeypatch.setattr(cs, "effective_input_type_cell", lambda st, cfg, *, side: by_side[side])
     monkeypatch.setattr(pinmem, "_require_partition_config", lambda cfg: cfg)
     monkeypatch.setattr(pinmem, "_build_pred_control_reference_core", lambda *a, **k: None)
 
@@ -2133,12 +2167,12 @@ def test_cell_pass_refuses_a_side_that_is_not_counts_before_the_builder(monkeypa
 
 
 @pytest.mark.parametrize("allow_discrete", [False, True])
-def test_cell_pass_counts_check_reads_the_resolved_type(monkeypatch, allow_discrete):
-    """The counts check reads the RESOLVED type. Fractional archives autodetect as lognorm and
-    are refused up front -- unless allow_discrete, which makes the resolver answer "counts"
-    without reading a value: the check then passes. What remains are the value checks: with
-    validate_input off the call reaches the builder; with it on, the early value check refuses
-    the fractional prediction before the builder."""
+def test_cell_pass_counts_check_reads_the_effective_type(monkeypatch, allow_discrete):
+    """Under a declared counts type both sides are counts whatever allow_discrete says, so the
+    counts check passes on fractional archives: with validate_input off the call reaches the
+    builder; with it on, the early value check refuses the fractional prediction before the
+    builder, naming the pred-side fix. Under autodetect_input_type the prediction is detected as
+    lognorm and refused up front, unless allow_discrete makes it counts."""
     import anndata as ad_
     import cell_eval2.partition_inmem as pinmem
     from cell_eval2.cellstream import score_cellstream
@@ -2156,15 +2190,22 @@ def test_cell_pass_counts_check_reads_the_resolved_type(monkeypatch, allow_discr
     monkeypatch.setattr(pinmem, "_build_reference_streaming_core", _sentinel_ref)
     cfg = EvalConfig(pert_col="perturbation", metrics=list(_CELL_SEL),
                      allow_discrete=allow_discrete)
+    with pytest.raises(_Built):
+        score_cellstream("pred.shad", "real.shad",
+                         config=replace(cfg, validate_input=False), mem_budget=_BIG)
+    with pytest.raises(ValueError, match=_whole(_pred_refusal(cell=True))) as info:
+        score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG)
+    assert "autodetect_input_type" not in str(info.value)
+    assert "deselect the cell metrics" in str(info.value)
+    auto = replace(cfg, autodetect_input_type=True)
     if allow_discrete:
-        with pytest.raises(_Built):
-            score_cellstream("pred.shad", "real.shad",
-                             config=replace(cfg, validate_input=False), mem_budget=_BIG)
-        with pytest.raises(ValueError, match="fractional"):
-            score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG)
+        with pytest.raises(ValueError, match=_whole(_pred_refusal(autodetect=True))) as info:
+            score_cellstream("pred.shad", "real.shad", config=auto, mem_budget=_BIG)
+        assert "allow_fractional_counts=True" in str(info.value)
+        assert "autodetect_input_type" not in str(info.value)
     else:
-        with pytest.raises(ValueError, match="need raw counts"):
-            score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG)
+        with pytest.raises(ValueError, match=r"need raw counts.*the pred side"):
+            score_cellstream("pred.shad", "real.shad", config=auto, mem_budget=_BIG)
 
 
 def test_cell_pass_scratch_budget_check(monkeypatch):
@@ -2328,6 +2369,187 @@ def test_cell_pass_value_checks_one_predicted_perturbation_before_the_builder(mo
     for name, rows in log:
         assert rows.size == 500, name
         assert np.isin(rows, stores[f"{name}.shad"].rows_of(pert)).all(), name
+
+
+_SIZES_20 = {"control": 20, "A": 20, "B": 20}
+#: Every label's rows: whole numbers (counts) or 0.37 per gene (a fractional per-cell total).
+_DATA_FILL = {"counts": {"control": 1.0, "A": 1.0, "B": 1.0},
+              "lognorm": {"control": 0.37, "A": 0.37, "B": 0.37}}
+
+
+@pytest.mark.parametrize("data", ["counts", "lognorm"])
+@pytest.mark.parametrize("side", ["real", "pred"])
+@pytest.mark.parametrize("autodetect", [False, True])
+@pytest.mark.parametrize("declared", ["counts", "lognorm"])
+def test_effective_input_type_cell_follows_the_in_memory_rule(declared, autodetect, side, data):
+    """The declared type with no read, except that autodetect_input_type detects the pred side
+    from its rows (run._effective_input_type's rule). The store is left open."""
+    from cell_eval2.cellstream import effective_input_type_cell
+    from cell_eval2.config import EvalConfig
+
+    log: list = []
+    store = _ValueStore("s", log, _SIZES_20, _DATA_FILL[data])
+    cfg = EvalConfig(input_type=declared, autodetect_input_type=autodetect)
+    detects = autodetect and side == "pred"
+    assert effective_input_type_cell(store, cfg, side=side) == (data if detects else declared)
+    assert [name for name, _ in log] == (["s"] if detects else [])
+    assert store.close_count == 0
+
+
+def test_effective_input_type_cell_refuses_an_unknown_side():
+    from cell_eval2.cellstream import effective_input_type_cell
+    from cell_eval2.config import EvalConfig
+
+    log: list = []
+    store = _ValueStore("s", log, _SIZES_20, _DATA_FILL["counts"])
+    with pytest.raises(ValueError, match="side must be 'real' or 'pred', got 'both'"):
+        effective_input_type_cell(store, EvalConfig(), side="both")
+    assert log == []
+
+
+@pytest.mark.parametrize("side", ["real", "pred"])
+@pytest.mark.parametrize("autodetect", [False, True])
+def test_allow_discrete_moves_only_an_autodetected_pred(autodetect, side):
+    """allow_discrete has no effect on a declared type. Under autodetect_input_type it makes the
+    pred side counts after one read, whatever the values."""
+    from cell_eval2.cellstream import effective_input_type_cell
+    from cell_eval2.config import EvalConfig
+
+    log: list = []
+    store = _ValueStore("s", log, _SIZES_20, _DATA_FILL["lognorm"])
+    cfg = EvalConfig(input_type="lognorm", allow_discrete=True, autodetect_input_type=autodetect)
+    moved = autodetect and side == "pred"
+    assert effective_input_type_cell(store, cfg, side=side) == ("counts" if moved else "lognorm")
+    assert len(log) == (1 if moved else 0)
+
+
+class _FactsSeen(Exception):
+    """Raised by a check_facts stub once it has the run's RunFacts."""
+
+
+def _fractional_stores(monkeypatch, log):
+    """Patch ``open_cell_store`` to two fractional ``_ValueStore``s, named by side."""
+    import cell_eval2.cellstream as cs
+    import cell_eval2.partition_inmem as pinmem
+
+    stores = {f"{name}.shad": _ValueStore(name, log, _SIZES_20, _DATA_FILL["lognorm"])
+              for name in ("pred", "real")}
+    monkeypatch.setattr(cs, "open_cell_store", lambda p: stores[p])
+    monkeypatch.setattr(pinmem, "_require_partition_config", lambda cfg: cfg)
+    return stores
+
+
+def _facts_of(cfg):
+    """``(input_type_real, input_type_pred)`` of the facts ``score_cellstream`` checks."""
+    import cell_eval2.cellstream as cs
+
+    seen = []
+
+    def _check(facts):
+        seen.append(facts)
+        raise _FactsSeen()
+    with pytest.raises(_FactsSeen):
+        cs.score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG,
+                            check_facts=_check)
+    (facts,) = seen
+    return facts.input_type_real, facts.input_type_pred
+
+
+@pytest.mark.parametrize("overrides, expected, read", [
+    ({}, ("counts", "counts"), []),
+    ({"input_type": "lognorm"}, ("lognorm", "lognorm"), []),
+    ({"autodetect_input_type": True}, ("counts", "lognorm"), ["pred"]),
+])
+def test_score_cellstream_types_each_side_by_the_rule(monkeypatch, overrides, expected, read):
+    """On two fractional archives the run's facts carry the declared type on both sides, and
+    under autodetect_input_type the pred side's detected type; only that detection reads rows."""
+    from cell_eval2.config import EvalConfig
+
+    log: list = []
+    _fractional_stores(monkeypatch, log)
+    cfg = EvalConfig(pert_col="perturbation", metrics=["expr_mae"], **overrides)
+    assert _facts_of(cfg) == expected
+    assert [name for name, _ in log] == read
+
+
+def test_score_cellstream_asks_effective_input_type_cell_for_each_side(monkeypatch):
+    import cell_eval2.cellstream as cs
+    from cell_eval2.config import EvalConfig
+
+    log: list = []
+    stores = _fractional_stores(monkeypatch, log)
+    calls = []
+    original = cs.effective_input_type_cell
+
+    def _spy(store, cfg, *, side):
+        calls.append((store, side))
+        return original(store, cfg, side=side)
+    monkeypatch.setattr(cs, "effective_input_type_cell", _spy)
+    _facts_of(EvalConfig(pert_col="perturbation", metrics=["expr_mae"]))
+    assert calls == [(stores["real.shad"], "real"), (stores["pred.shad"], "pred")]
+
+
+def test_score_cellstream_refuses_an_undeclared_lognorm_real_archive(monkeypatch):
+    """A real archive with fractional values under the default declared counts is refused by the
+    real reference builder's value check on its control block, with the real-side fix, before
+    any DE runs or any pred piece is scored."""
+    import cell_eval2.partition_inmem as pinmem
+    from cell_eval2.cellstream import score_cellstream
+    from cell_eval2.config import EvalConfig
+
+    log: list = []
+    _fractional_stores(monkeypatch, log)
+    ran = []
+    monkeypatch.setattr(pinmem, "compute_de", lambda *a, **k: ran.append("de"))
+    monkeypatch.setattr(pinmem, "score_piece", lambda *a, **k: ran.append("piece"))
+    cfg = EvalConfig(pert_col="perturbation", metrics=["expr_mae"])
+    with pytest.raises(ValueError, match=_whole(_real_refusal())) as info:
+        score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG)
+    assert "never for log-normalized data" not in str(info.value)
+    assert ran == []
+    assert [name for name, _ in log] == ["real"]
+
+
+def test_score_cellstream_real_refusal_with_cell_metrics_says_to_deselect_them(monkeypatch):
+    """With cell metrics selected, declaring lognorm would fail their raw-counts gate, so the
+    real-side refusal of a lognorm archive does not suggest it."""
+    import cell_eval2.cellstream as cs
+    import cell_eval2.partition_inmem as pinmem
+    from cell_eval2.cellstream import score_cellstream
+    from cell_eval2.config import EvalConfig
+
+    log: list = []
+    stores = {"pred": _ValueStore("pred", log, _SIZES_20, _DATA_FILL["counts"]),
+              "real": _ValueStore("real", log, _SIZES_20, _DATA_FILL["lognorm"])}
+    monkeypatch.setattr(cs, "open_cell_store", lambda p: stores[p.split(".")[0]])
+    monkeypatch.setattr(pinmem, "_require_partition_config", lambda cfg: cfg)
+    monkeypatch.setattr(cs, "_precheck_cell_pass", lambda *a, **k: None)   # opens real archives
+    monkeypatch.setattr(pinmem, "compute_de", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("reached DE")))
+    cfg = EvalConfig(pert_col="perturbation", metrics=["expr_mae", "cell_cov_ccc"])
+    with pytest.raises(ValueError, match=_whole(_real_refusal(cell=True))) as info:
+        score_cellstream("pred.shad", "real.shad", config=cfg, mem_budget=_BIG)
+    assert 'declare input_type="lognorm"' not in str(info.value)
+
+
+def test_type_hints_follow_the_cell_metric_selection():
+    """The hints never suggest ``lognorm`` or autodetect while cell metrics are selected, and the
+    fractional-counts condition text stays."""
+    from cell_eval2.config import EvalConfig
+    from cell_eval2.partition_inmem import (
+        _CELL_COUNTS_FIX, _PRED_TYPE_FIX, _REAL_FRACTIONAL_FIX, _pred_type_fixes,
+        _real_type_fixes)
+
+    with_cell, without = ["expr_mae", "cell_cov_ccc"], ["expr_mae"]
+    cfg = EvalConfig(pert_col="perturbation")
+    assert _real_type_fixes(with_cell) == (_CELL_COUNTS_FIX,)
+    assert _real_type_fixes(without) == (_REAL_FRACTIONAL_FIX,)
+    assert _pred_type_fixes(cfg, with_cell) == (_CELL_COUNTS_FIX,)
+    assert _pred_type_fixes(cfg, without) == (
+        _PRED_TYPE_FIX + "; otherwise set autodetect_input_type=True.",)
+    auto = EvalConfig(pert_col="perturbation", autodetect_input_type=True)
+    assert _pred_type_fixes(auto, with_cell) == ()
+    assert "lognorm" not in _CELL_COUNTS_FIX and "autodetect" not in _CELL_COUNTS_FIX
 
 
 _GENE_MAP = {"A": "g0", "B": "g1"}
@@ -2875,16 +3097,6 @@ def _mean_baseline_pred(real, seed):
     return pred
 
 
-def _pred_with_fractional_gene_c():
-    """``_corr_adata("pred", 1)`` with GENE_C's cells halved: fractional there, integer counts in
-    every other group."""
-    pred = _corr_adata("pred", 1)
-    X = pred.X.toarray()
-    X[(pred.obs["perturbation"] == "GENE_C").to_numpy()] *= 0.5
-    pred.X = sp.csr_matrix(X)
-    return pred
-
-
 def _write_adata(tmp_path, name, adata):
     """Write ``adata`` as a grouped, reference-first cell archive; return its path."""
     pytest.importorskip("cellstream")
@@ -2931,31 +3143,21 @@ def test_cell_pass_fixture_scores_finite_ccc_on_cpu():
         assert all(np.isfinite(v) for v in got.values()), got
 
 
-def test_cell_pass_value_check_fixtures_fail_where_the_gpu_tests_need():
-    """The GPU tests' failing predictions under the validator that allow_discrete alone leaves
-    on: the GENE_C-fractional one passes the check for GENE_A (the first perturbation scored)
-    and GENE_B and fails it for GENE_C, so the early check passes and the pass fails; the
-    mean-baseline one fails it for the first perturbation, so the early check fails."""
+def test_cell_pass_value_check_fixture_fails_where_the_gpu_test_needs():
+    """The mean-baseline prediction fails the value check for the first perturbation the pass
+    scores, so without allow_fractional_counts the early check refuses the call before the
+    reference builder."""
     from cell_eval2.cell_rowsource import AnnDataSource
     from cell_eval2.cells_prep import CellsPrep
     from cell_eval2.config import EvalConfig
     from cell_eval2.run import _cell_block_validator
 
-    cfg = EvalConfig(pert_col="perturbation", control="control", allow_discrete=True)
+    cfg = EvalConfig(pert_col="perturbation", control="control")
     validate = _cell_block_validator(cfg, {"pred": "counts", "real": "counts"})
     real = _corr_adata("real", 2)
-
-    def _prep(pred):
-        return CellsPrep(AnnDataSource(pred), AnnDataSource(real), pert_col="perturbation",
-                         control="control", validate_cells=validate)
-
-    prep = _prep(_pred_with_fractional_gene_c())
-    assert prep.perts == ["GENE_A", "GENE_B", "GENE_C"] and prep.depth("GENE_A") >= 50
-    prep.pair("GENE_A")
-    prep.pair("GENE_B")
-    with pytest.raises(ValueError, match="fractional"):
-        prep.pair("GENE_C")
-    prep = _prep(_mean_baseline_pred(real, 5))
+    prep = CellsPrep(AnnDataSource(_mean_baseline_pred(real, 5)), AnnDataSource(real),
+                     pert_col="perturbation", control="control", validate_cells=validate)
+    assert prep.depth(prep.perts[0]) >= 50
     with pytest.raises(ValueError, match="fractional"):
         prep.pair(prep.perts[0])
 
@@ -3021,10 +3223,9 @@ def test_cell_pass_leaves_every_other_metric_bit_exact_gpu(tmp_path):
 
 
 def test_cell_pass_scores_a_mean_baseline_fractional_pred_gpu(tmp_path, monkeypatch, caplog):
-    """A mean-baseline fractional prediction scores finite cell_cov_ccc values with
-    allow_discrete + allow_fractional_counts. With allow_discrete alone, the early value check
-    fails the call before the reference builder and the aggregation, so the cell pass never
-    runs."""
+    """A mean-baseline fractional prediction declared counts scores finite cell_cov_ccc values
+    with allow_fractional_counts. Without it, the early value check fails the call before the
+    reference builder and the aggregation, so the cell pass never runs."""
     _skip_if_no_gpu()
     import logging
     import cell_eval2.partition as partition
@@ -3036,7 +3237,7 @@ def test_cell_pass_scores_a_mean_baseline_fractional_pred_gpu(tmp_path, monkeypa
     pred = _write_adata(tmp_path, "pred", _mean_baseline_pred(real_ad, 5))
     sel = full_minus_moments() + ["cell_cov_ccc"]
     res = score_cellstream(pred, real, config=_gpu_cfg(
-        metrics=sel, allow_discrete=True, allow_fractional_counts=True), mem_budget=_BIG)
+        metrics=sel, allow_fractional_counts=True), mem_budget=_BIG)
     ccc = _ccc_rows(res.per_pert)
     assert ccc.height == 3 and np.isfinite(ccc["value"].to_numpy()).all()
 
@@ -3054,9 +3255,8 @@ def test_cell_pass_scores_a_mean_baseline_fractional_pred_gpu(tmp_path, monkeypa
     monkeypatch.setattr(pinmem, "_build_reference_streaming_core", _spy_build)
     caplog.clear()   # the first call's record may already be captured (e.g. under log_cli)
     with caplog.at_level(logging.INFO, logger="cell_eval2.cellstream"):
-        with pytest.raises(ValueError, match="fractional"):
-            score_cellstream(pred, real, config=_gpu_cfg(metrics=sel, allow_discrete=True),
-                             mem_budget=_BIG)
+        with pytest.raises(ValueError, match=_whole(_pred_refusal(cell=True))):
+            score_cellstream(pred, real, config=_gpu_cfg(metrics=sel), mem_budget=_BIG)
     assert aggregated == [] and built == []
     assert _cell_pass_records(caplog) == []
 
@@ -3084,10 +3284,11 @@ def test_cell_pass_leaves_out_a_perturbation_below_50_cells_gpu(tmp_path):
 
 def test_cell_pass_fail_fast_checks_raise_before_the_reference_builder_gpu(tmp_path,
                                                                            monkeypatch):
-    """On real archives: a lognorm side, a cell-only selection and a GPU budget below
-    21 * G**2 each raise before the reference builder runs. At the boundary budget the call
-    completes; with mem_budget=None the budget check does not run (the builder is reached --
-    the partitioned planner itself needs a budget, so a sentinel stops the run there)."""
+    """On real archives: a prediction detected as lognorm (autodetect_input_type), a cell-only
+    selection and a GPU budget below 21 * G**2 each raise before the reference builder runs.
+    At the boundary budget the call completes; with mem_budget=None the budget check does not
+    run (the builder is reached -- the partitioned planner itself needs a budget, so a sentinel
+    stops the run there)."""
     _skip_if_no_gpu()
     import cell_eval2.partition_inmem as pinmem
     from cell_eval2.cellstream import score_cellstream
@@ -3107,7 +3308,9 @@ def test_cell_pass_fail_fast_checks_raise_before_the_reference_builder_gpu(tmp_p
 
     ln_pred, _ = _write_cell(tmp_path, "ln_pred", 3, n_per=60, n_genes=n_genes, lognorm=True)
     with pytest.raises(ValueError, match=r"cell_cov_ccc.*need raw counts.*the pred side"):
-        score_cellstream(str(ln_pred), real, config=_gpu_cfg(metrics=sel), mem_budget=_BIG)
+        score_cellstream(str(ln_pred), real,
+                         config=_gpu_cfg(metrics=sel, autodetect_input_type=True),
+                         mem_budget=_BIG)
     with pytest.raises(NotImplementedError, match="compute_metrics"):
         score_cellstream(pred, real, config=_gpu_cfg(metrics=["cell_cov_ccc"]), mem_budget=_BIG)
     need = 21 * n_genes ** 2
@@ -3130,20 +3333,20 @@ def test_cell_pass_fail_fast_checks_raise_before_the_reference_builder_gpu(tmp_p
     assert built == [True, None]
 
 
-def test_cell_pass_write_de_publishes_together_or_not_at_all_gpu(tmp_path, caplog):
-    """write_de=True: a failure inside the cell pass leaves a pre-seeded outdir exactly as it
-    was; a good call then publishes the five outputs together, cell_cov_ccc included. The
-    prediction is fractional in GENE_C only, without allow_fractional_counts: the early value
-    check reads GENE_A and passes, and the pass's own check fails at GENE_C, past the
-    partitioned loop."""
+def test_cell_pass_write_de_publishes_together_or_not_at_all_gpu(tmp_path, monkeypatch,
+                                                                   caplog):
+    """write_de=True: a failure inside the cell pass, past the partitioned loop, leaves a
+    pre-seeded outdir exactly as it was; a good call then publishes the five outputs together,
+    cell_cov_ccc included."""
     _skip_if_no_gpu()
     import logging
     import os
     import polars as pl
     import cell_eval2.cellstream as cs
+    import cell_eval2.run as run
 
     real = _write_adata(tmp_path, "real", _corr_adata("real", 2))
-    pred = _write_adata(tmp_path, "pred", _pred_with_fractional_gene_c())
+    pred = _write_adata(tmp_path, "pred", _corr_adata("pred", 1))
     outdir = tmp_path / "out"
     outdir.mkdir()
     old = {}
@@ -3151,17 +3354,24 @@ def test_cell_pass_write_de_publishes_together_or_not_at_all_gpu(tmp_path, caplo
         _de_piece_frame(f"OLD_{name}").write_parquet(outdir / name)
         old[name] = (outdir / name).read_bytes()
     sel = full_minus_moments() + ["cell_cov_ccc"]
-    with caplog.at_level(logging.INFO, logger="cell_eval2.cellstream"):
-        with pytest.raises(ValueError, match="fractional"):
-            cs.score_cellstream(pred, real, config=_gpu_cfg(metrics=sel, allow_discrete=True),
-                                mem_budget=_BIG, outdir=str(outdir), write_de=True)
+
+    class _CellPassFailed(Exception):
+        pass
+
+    def _fail(*a, **k):
+        raise _CellPassFailed()
+    with monkeypatch.context() as m:
+        m.setattr(run, "_score_cell_metrics_on_sources", _fail)
+        with caplog.at_level(logging.INFO, logger="cell_eval2.cellstream"):
+            with pytest.raises(_CellPassFailed):
+                cs.score_cellstream(pred, real, config=_gpu_cfg(metrics=sel),
+                                    mem_budget=_BIG, outdir=str(outdir), write_de=True)
     assert len(_cell_pass_records(caplog)) == 1
     assert sorted(os.listdir(outdir)) == sorted(old)
     for name, data in old.items():
         assert (outdir / name).read_bytes() == data, name
 
-    cs.score_cellstream(pred, real, config=_gpu_cfg(metrics=sel, allow_discrete=True,
-                                                    allow_fractional_counts=True),
+    cs.score_cellstream(pred, real, config=_gpu_cfg(metrics=sel),
                         mem_budget=_BIG, outdir=str(outdir), write_de=True)
     assert sorted(os.listdir(outdir)) == sorted(cs._WRITE_DE_OUTPUTS)
     for name, data in old.items():
@@ -3196,6 +3406,70 @@ def test_cell_pass_log_line_gpu(tmp_path, caplog):
         score_cellstream(pred, real, config=_gpu_cfg(metrics=full_minus_moments()),
                          mem_budget=_BIG)
     assert _cell_pass_records(caplog) == []
+
+
+def _types_and_result(pred, real, cfg):
+    """``((input_type_real, input_type_pred), ScoreResult)`` of one ``score_cellstream`` call."""
+    from cell_eval2.cellstream import score_cellstream
+
+    seen = []
+    res = score_cellstream(pred, real, config=cfg, mem_budget=_BIG,
+                           check_facts=lambda f: seen.append((f.input_type_real,
+                                                              f.input_type_pred)))
+    return seen[0], res
+
+
+def test_score_cellstream_counts_pair_scores_alike_with_and_without_autodetect_gpu(tmp_path):
+    """A counts pair scores counts/counts under its declared type and under
+    autodetect_input_type, with bit-equal values."""
+    _skip_if_no_gpu()
+    pred, _ = _write_cell(tmp_path, "pred", 1)
+    real, _ = _write_cell(tmp_path, "real", 2)
+    cfg = _gpu_cfg(metrics=full_minus_moments())
+    types, declared = _types_and_result(pred, real, cfg)
+    types_auto, auto = _types_and_result(pred, real, replace(cfg, autodetect_input_type=True))
+    assert types == types_auto == ("counts", "counts")
+    assert declared.per_pert.height > 0
+    _assert_bit_equal(declared.per_pert, auto.per_pert,
+                      ["dataset", "panel_id", "context", "perturbation", "metric"])
+
+
+def test_score_cellstream_refuses_an_undeclared_lognorm_archive_on_the_real_side_gpu(tmp_path):
+    """A lognorm pair under the default declared counts is refused on the real side, with the
+    fix in the message; declared lognorm, the same pair scores."""
+    _skip_if_no_gpu()
+    pred, _ = _write_cell(tmp_path, "pred", 1, lognorm=True)
+    real, _ = _write_cell(tmp_path, "real", 2, lognorm=True)
+    from cell_eval2.cellstream import score_cellstream
+    cfg = _gpu_cfg(metrics=full_minus_moments())
+    with pytest.raises(ValueError, match=_whole(_real_refusal())):
+        score_cellstream(pred, real, config=cfg, mem_budget=_BIG)
+    types, res = _types_and_result(pred, real, replace(cfg, input_type="lognorm"))
+    assert types == ("lognorm", "lognorm")
+    assert res.per_pert.height > 0
+
+
+def test_score_cellstream_scores_a_mean_baseline_pred_without_allow_discrete_gpu(tmp_path):
+    """A mean-baseline prediction declared counts scores counts/counts with
+    allow_fractional_counts alone, bit-equal to the same call with allow_discrete; without
+    allow_fractional_counts, score_piece refuses its first piece with the pred-side fix."""
+    _skip_if_no_gpu()
+    from cell_eval2.cellstream import score_cellstream
+
+    real_ad = _corr_adata("real", 2)
+    real = _write_adata(tmp_path, "real", real_ad)
+    pred = _write_adata(tmp_path, "pred", _mean_baseline_pred(real_ad, 5))
+    cfg = _gpu_cfg(metrics=full_minus_moments(), allow_fractional_counts=True)
+    types, res = _types_and_result(pred, real, cfg)
+    types_discrete, discrete = _types_and_result(pred, real, replace(cfg, allow_discrete=True))
+    assert types == types_discrete == ("counts", "counts")
+    assert np.isfinite(res.per_pert["value"].to_numpy()).any()
+    _assert_bit_equal(res.per_pert, discrete.per_pert,
+                      ["dataset", "panel_id", "context", "perturbation", "metric"])
+    with pytest.raises(ValueError, match=_whole(_pred_refusal(declare_only=True))) as info:
+        score_cellstream(pred, real, config=replace(cfg, allow_fractional_counts=False),
+                         mem_budget=_BIG)
+    assert "never for log-normalized data" in str(info.value)
 
 
 # #412 / design §6 and §8: keep document fixtures after the existing streaming tests
@@ -3318,7 +3592,7 @@ def test_score_cellstream_records_the_auc_floor_it_used(tmp_path, monkeypatch):
                         outdir=str(tmp_path / "out"))
     s = load_document(tmp_path / "out" / FILENAME)["suite"]["settings"]
     assert s["de"]["auc_pval_floor"] == "preserve"              # min_nonzero was asked for
-    assert s["de"]["backend"] == "gpudge" and s["de"]["engine"]["name"] == "gpudge"
+    assert s["de"]["backend"] == "gpudge" and s["de"]["engine"] == "gpudge"
 
 
 def test_without_write_de_the_document_is_written_after_the_parquets(tmp_path, monkeypatch):
@@ -3598,6 +3872,9 @@ def test_document_rejects_unrecordable_settings_before_archive_io(tmp_path, monk
 @pytest.mark.parametrize("path, value", [
     ("scoring_path", "in_memory"),
     ("control", "other_control"),
+    ("de.engine", "scanpy"),
+    ("de.engine", {"name": "scanpy", "version": "0.0.1", "provenance": "release",
+                   "commit": None}),
 ])
 def test_score_cellstream_refuses_a_differing_fact_before_any_de_work(
         tmp_path, monkeypatch, path, value):
@@ -3627,7 +3904,20 @@ def test_score_cellstream_refuses_a_differing_fact_before_any_de_work(
                         mem_budget=_BIG, check_facts=facts_checker(doc))
     assert calls == ["reference"]
     calls.clear()
-    doc["suite"]["settings"][path] = value
+    # A document from 0.21.0 or earlier holds the engine as an object; its name is compared.
+    old = json.loads(json.dumps(doc))
+    old["suite"]["settings"]["de"]["engine"] = {
+        "name": doc["suite"]["settings"]["de"]["engine"], "version": "0.0.1",
+        "provenance": "git", "commit": "a" * 40}
+    cs.score_cellstream("pred.shad", "real.shad", config=settings_to_config(old),
+                        mem_budget=_BIG, check_facts=facts_checker(old))
+    assert calls == ["reference"]
+    calls.clear()
+    *parents, leaf = path.split(".")
+    target = doc["suite"]["settings"]
+    for part in parents:
+        target = target[part]
+    target[leaf] = value
     with pytest.raises(SettingsMismatch, match=path):
         cs.score_cellstream("pred.shad", "real.shad", config=settings_to_config(doc),
                             mem_budget=_BIG, check_facts=facts_checker(doc))

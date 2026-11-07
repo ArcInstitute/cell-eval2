@@ -4,6 +4,89 @@ All notable changes to cell_eval2. Releases before 0.0.4 (`v0.0.2`, `v0.0.3`) pr
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-06
+
+### Added
+
+- **Metric drift check on every PR, image comparison and streaming comparison (internal
+  tooling).** A CI job `metric-drift` runs `tools/metric_drift/drift_check.py --pr` against the
+  PR's base: values, the identity catalog check against the base ledger, and a new coverage
+  floor; only the head-ledger equality check is skipped. The floor fails a metric
+  without a finite fixture value (a retained metric needs one on both sides, an added metric one
+  on the head side) unless `tools/metric_drift/coverage_exempt.txt` names it with a
+  reason (`de_deseq2_*`). The drift check also scores an `opt_in` profile (today
+  `delta_pearson_degs`). `--installed --base-python … --head-python … --engine gpudge` compares
+  two release images, each with its installed cell_eval2 at its ref (`image_drift.sbatch` on a
+  GPU node), and `tools/metric_drift/compare_results.py` compares the `evaluation_results.json`
+  documents of two arcbench-nf runs. Every refusal of the two tools exits 2 and leaves no
+  stale `report.md`. No scoring change; the release drift run stays mandatory.
+
+### Changed
+
+- **`score_cellstream` scores the declared input type, and `score_piece` validates prediction
+  pieces.** Mean baselines no longer need `allow_discrete` to score as counts; with
+  `validate_input` on they need `allow_fractional_counts=True`.
+  - **BREAKING (`score_cellstream`): the declared `input_type` is trusted, by the in-memory
+    rule.** Both sides are scored in the declared type with no data read; with
+    `autodetect_input_type` the prediction's type is detected from its first 2,000 rows and the
+    real side keeps the declared type. The new public `effective_input_type_cell(store, cfg, *,
+    side)` returns the type each side is scored in. With `validate_input` on (the default), a
+    lognorm archive that is not declared `lognorm` is now refused: under the default `counts`,
+    the real side fails as fractional, and, with no cell metric selected, the message says to
+    declare `input_type="lognorm"`; a counts archive declared `lognorm` is refused as
+    all-integer. `allow_discrete` has no effect with a declared type under `v2`; under
+    `autodetect_input_type` it still makes the prediction counts. A valid counts/counts pair
+    scores as before. `cell_archive_input_type` is unchanged and still reads the data. Under `v1`
+    the reference builders detect the type themselves, so the type that
+    `effective_input_type_cell` returns can differ from the type the scored data gets.
+  - **BREAKING (`score_piece`): each prediction piece is validated before it is scored**, as the
+    reference builders validate the real side: with `validate_input` on, negative values,
+    fractional values under a declared `counts` (unless `allow_fractional_counts`), all-integer
+    values under a `lognorm` type and per-cell totals above `max_counts_per_cell` are refused.
+    `score_cellstream`, `score_h5ad_manifest` and `score_rowstore` call `score_piece`, so they
+    now refuse such pieces, also in rows that `score_cellstream`'s old 2,000-row peek never read.
+    `score_h5ad_manifest` and `score_rowstore` keep their input-type rules; `score_cellstream`'s
+    rule changes as described above. The fractional refusal names
+    `allow_fractional_counts=True` as the fix for fractional expected counts (for example a mean
+    baseline), never for log-normalized data; `score_cellstream` adds that `input_type` is one
+    setting for both sides, and suggests `autodetect_input_type` only where it would not refuse
+    again (not with `allow_discrete`, and not for DE metrics with `control_source="real"`). With
+    cell metrics selected, which need raw counts on both sides, `score_cellstream` suggests
+    neither `lognorm` nor `autodetect_input_type` on either side: log-normalized data needs the
+    cell metrics deselected. With `allow_fractional_counts`, the warning that the allowance was
+    needed is logged once per run, not once per piece. Under a declared `counts`, without cell
+    metrics and with `control_source="real"`, a log1p prediction is refused at its first piece,
+    after the real reference is built.
+  - `tools/partition/run_partition.py score-piece` takes `--allow-fractional-counts`, which sets
+    `allow_fractional_counts` in the config; without it, a fractional piece is refused.
+  - `allow_fractional_counts` is not a recorded setting, so a 0.21.0 document of a mean baseline
+    scored with `control_source="real"` no longer replays from its settings alone: replay needs
+    `allow_fractional_counts=True`.
+- **BREAKING (`suite.settings.de.engine`): the object becomes the engine's name, and the
+  `gpudge` extra pins gpudge exactly.** `de.engine` was `{name, version, provenance, commit}`;
+  it is now the distribution name string (`"gpudge"`, `"pdex"` or `"scanpy"`), or `null` when no
+  DE ran. A `deseq2` run writes no document. A different engine version, provenance or commit no
+  longer makes a different `settings`. A different engine name, or a different `device`, still
+  does.
+  - Version and provenance live in the `environment` block of `run_meta.json`, which
+    `cell-eval2 run` writes when it computes the real DE table, and of the `baseline_meta.json`
+    of a real bundle that computes its real DE table (a supplied `de_real` records none). The
+    `score_cellstream` document and the `cell-eval2 baseline` meta record the engine name only.
+    `compute_metrics(..., outdir=...)` writes no document; its `run_params.yaml` holds the
+    configured `de.backend` (possibly `auto`). The engine's commit is no longer recorded;
+    `suite.commit` is unchanged.
+  - Replay compares engine names. A document from cell_eval2 0.21.0 or earlier, which holds the
+    object, replays by that object's `name`. A document that holds the name string cannot be
+    replayed by 0.21.0 or earlier.
+  - For documents that record a DE engine, a consumer that compares every `settings` key sees a
+    one-time split between documents written before and after this change; a document with
+    `de.engine` `null` is unaffected. The `evaluation_results` schema accepts any `settings`
+    object and is unchanged.
+  - `pip install 'cell-eval2[gpudge]'` installs `gpudge==0.9.1` (was `>=0.9.0`). Nothing checks
+    the version at run time; a bump of the pin is a cell_eval2 release. Only gpudge is pinned:
+    pdex and scanpy versions are not pinned and not checked on replay, and only `run_meta.json`
+    and `baseline_meta.json` record them.
+
 ## [0.21.0] — 2026-11-02
 
 ### Added

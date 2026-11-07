@@ -142,9 +142,9 @@ _INT_CHUNK = 1 << 22  # ~4M elements/chunk: chunk-sized temporaries only, never 
 #: metric specification -- says a submission "must be raw, untransformed counts: non-negative,
 #: integral, ... A matrix failing any of these is rejected rather than scored". This does not make
 #: the gate that rule; it closes the VALUE-SCALED hole in the proxy for it, leaving an
-#: integral-to-1e-6 test on the paths that reach this function (``partition_inmem.score_piece`` and
-#: the direct shard drivers do not -- see ``check_scale_limit``'s docstring). Stated that way on
-#: purpose: "now enforces the published rule" would be a third overclaim in the same comment.
+#: integral-to-1e-6 test on the paths that reach this function (the direct shard drivers do not).
+#: Stated that way on purpose: "now enforces the published rule" would be a third overclaim in the
+#: same comment.
 #:
 #: NOT exact equality, deliberately. float32 represents every integer exactly to ``2**24`` =
 #: 16,777,216, sixteen times the per-cell cap, so ``(x == rint(x)).all()`` is defensible on the
@@ -615,9 +615,8 @@ def check_scale_limit(
     open for ``version="v1"`` (which skips that validation), for a fractional-allowed leg, and for
     ``input_type="lognorm"`` -- whose validation DOES test integrality, but in the opposite
     direction: it rejects an all-integer matrix as mislabeled counts, and a NaN matrix reads as
-    "not all-integer", which is the verdict lognorm wants. ``partition_inmem.score_piece``
-    materializes a pred piece with neither gate -- see ``score_piece``; that file is not
-    this chunk's to change.
+    "not all-integer", which is the verdict lognorm wants. ``partition_inmem.score_piece`` runs
+    both gates on each pred piece under ``validate_input``.
     """
     X = adata.X
     if _n_elements(X) == 0:

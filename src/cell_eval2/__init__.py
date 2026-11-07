@@ -4,7 +4,7 @@ from importlib.metadata import PackageNotFoundError, version as _version
 
 from .ceiling import compute_ceiling
 from .lfc_nmae_ref import compute_lfc_nmae_reference
-from .cellstream import cell_archive_input_type, score_cellstream
+from .cellstream import cell_archive_input_type, effective_input_type_cell, score_cellstream
 from .config import DiscriminationParams, EvalConfig, FilterParams
 from .run import aggregate_metrics, aggregate_metrics_wide, compute_metrics, precompute_cache
 from .baseline import BaselineResult, build_generic_baseline
@@ -39,6 +39,7 @@ __all__ = [
     "aggregate_metrics_wide",
     "build_generic_baseline",
     "cell_archive_input_type",
+    "effective_input_type_cell",
     "facts_checker",
     "fingerprint_ground_truth_cell_archive",
     "precompute_cache",

@@ -14,11 +14,13 @@ reachability was inferred from #288 rather than measured. What the measurement f
   compares via `score.expect_from_run_meta`. The competition bundle path therefore still refuses
   it; the loose `--baseline-agg` path does not. Pinned below, because the two gates disagreeing
   about which fields are semantic is the thing that could silently change.
-* The shard/cell/cellstream drivers hard-code `autodetect=True`, so the frozen rule's
-  `autodetect_input_type: false` does NOT bind them. That is why #288's "unreachable because
-  autodetect is inside the frozen rule" does not transfer to this chunk -- and it is moot only
-  because no streaming driver can reach a bundle at all (no CLI dispatch; `build_run_meta` is
-  called only from cli.py's `run`).
+* The shard and cell streaming drivers (`score_streaming`, `score_streaming_cell`) peek the data
+  with `autodetect=True` for their counts-only gates, so the frozen rule's
+  `autodetect_input_type: false` does NOT bind those gates. That is why #288's "unreachable
+  because autodetect is inside the frozen rule" does not transfer to this chunk -- and it is moot
+  only because no streaming driver can reach a bundle at all (no CLI dispatch; `build_run_meta` is
+  called only from cli.py's `run`). `score_cellstream` follows the declared type instead
+  (`effective_input_type_cell`).
 """
 from dataclasses import replace
 
@@ -307,6 +309,37 @@ def test_score_streaming_cell_refuses_lognorm_archives_under_a_DECLARED_counts_c
                   validate_input=False)
     with pytest.raises(NotImplementedError, match=r"stored values are not counts.*DECLARED"):
         score_streaming_cell(pred, real, config=cfg)
+
+
+class _FakeCellStore:
+    """What `score_streaming_cell` reads before its counts-only gate: obs and a row gather."""
+
+    def __init__(self, adata):
+        self._adata = adata
+        self.obs = adata.obs
+        self.n_obs = adata.n_obs
+
+    def gather_rows_adata(self, row_ids, n_threads=1):
+        return self._adata[np.asarray(row_ids)].copy()
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("pred_ln,real_ln", [(True, False), (False, True)])
+def test_score_streaming_cell_peeks_past_a_DECLARED_counts_config_without_cellstream(
+        monkeypatch, pred_ln, real_ln):
+    """The counts-only gate still reads values, not the declaration, now that `score_cellstream`
+    trusts the declared type: a lognorm store under declared counts is refused."""
+    from cell_eval2 import scale
+    from cell_eval2.scale import score_streaming_cell
+    stores = {"pred": _FakeCellStore(_lognorm(_counts(1)) if pred_ln else _counts(1)),
+              "real": _FakeCellStore(_lognorm(_counts(2)) if real_ln else _counts(2))}
+    monkeypatch.setattr(scale, "open_cell_store", lambda p: stores[p])
+    cfg = replace(EvalConfig.v2(), metrics=["expr_mae"], device="cpu", input_type="counts",
+                  validate_input=False)
+    with pytest.raises(NotImplementedError, match=r"stored values are not counts.*DECLARED"):
+        score_streaming_cell("pred", "real", config=cfg)
 
 
 def test_score_streaming_cell_keeps_its_declared_lognorm_message(tmp_path):

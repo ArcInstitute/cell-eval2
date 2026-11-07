@@ -17,7 +17,7 @@ from importlib.metadata import Distribution
 
 import numpy as np
 
-from .baseline import DIGEST_EXEMPT_FIELDS, _package_provenance
+from .baseline import DIGEST_EXEMPT_FIELDS
 from .catalog import CATALOG
 from .config import EvalConfig
 from .de_compute import _BACKEND_MODULE
@@ -151,27 +151,30 @@ def vcs_commit(raw: str | None) -> str | None:
     return None
 
 
-def engine_record(backend: str) -> dict:
-    """Identify the engine without publishing paths or URLs (#412, design §8.2).
+def engine_record(backend: str) -> str:
+    """Name the DE engine's distribution, which is all ``de.engine`` records.
 
-    Editable and local builds have no PEP 610 VCS commit, so builds sharing a
-    version cannot be distinguished. This is documented rather than refused so
-    development installs can write documents. On a result-cache hit the record
-    describes the installed engine, as ``baseline.build_run_meta`` does.
+    The engine's version and provenance are not settings. ``environment`` in
+    ``run_meta.json`` (written by ``cell-eval2 run`` when it computes the real DE
+    table) and in a real bundle's ``baseline_meta.json`` carries them.
     """
-    dist = _BACKEND_MODULE[backend]
-    provenance = _package_provenance(dist)
-    return {
-        "name": dist,
-        "version": provenance["version"] if provenance is not None else None,
-        "provenance": provenance["provenance"] if provenance is not None else None,
-        "commit": vcs_commit(_direct_url(dist)),
-    }
+    return _BACKEND_MODULE[backend]
+
+
+def _engine_name(value):
+    """Return the engine name from either recorded shape of ``de.engine``.
+
+    A document from cell_eval2 0.21.0 or earlier holds the object
+    ``{name, version, provenance, commit}``.
+    """
+    if isinstance(value, Mapping) and isinstance(value.get("name"), str):
+        return value["name"]
+    return value
 
 
 def _leaves(settings, prefix=()):
-    # Maps and engine records are single settings; only EvalConfig's parameter
-    # groups expand into paths (#412, design §8.2).
+    # Maps are single settings; only EvalConfig's parameter groups expand into
+    # paths (#412, design §8.2).
     for name, value in settings.items():
         path = prefix + (name,)
         if not prefix and name in ("filter", "discrimination", "de") and isinstance(value, dict):
@@ -194,7 +197,7 @@ def build_settings(facts: RunFacts) -> dict:
     for name in NOT_RECORDED | {"input_type"}:
         result.pop(name, None)
     result["device"] = facts.device
-    # baseline.config_digest resolves only real-side DE; engine records either side
+    # baseline.config_digest resolves only real-side DE; engine names either side
     # so a supplied real table replays with the same identity (#412, design §8.2–§9).
     result["de"]["backend"] = (facts.de_backend
                                if facts.de_backend_used and facts.de_real_computed
@@ -279,6 +282,7 @@ def recorded_facts(settings: Mapping) -> dict[str, object]:
 def check_facts(expected: Mapping[str, object], facts: RunFacts) -> None:
     """Refuse all resolved differences before scoring (#412, design §9)."""
     actual = recorded_facts(build_settings(facts))
+    expected = {**expected, "de.engine": _engine_name(expected["de.engine"])}
     differences = [f"{path}: expected {expected[path]!r}, got {actual[path]!r}"
                    for path in FACT_PATHS if expected[path] != actual[path]]
     if differences:

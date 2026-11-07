@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextvars
+import functools
 import inspect
 import logging
 import math
@@ -154,6 +156,28 @@ def _validate_input_once(adata, input_type, *, allow_fractional) -> None:
     seen.add(key)
 
 
+#: ``None`` outside a driver run; ``False``/``True`` = the fractional-allowance warning has not /
+#: has been logged in the current ``warn_fractional_allowance_once_per_run`` scope.
+_fractional_warned: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "fractional_warned", default=None)
+
+
+def warn_fractional_allowance_once_per_run(fn):
+    """Decorate a scoring driver so ``_warn_fractional_allowance_used`` logs at most once per call
+    of ``fn``, however many pred pieces or contexts the run validates. A nested decorated call
+    shares its caller's scope."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if _fractional_warned.get() is not None:
+            return fn(*args, **kwargs)
+        token = _fractional_warned.set(False)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _fractional_warned.reset(token)
+    return wrapper
+
+
 def _warn_fractional_allowance_used(adata) -> None:
     """Say so when ``allow_fractional_counts`` actually let something through.
 
@@ -190,11 +214,19 @@ def _warn_fractional_allowance_used(adata) -> None:
     a classification there would make a cache hit read ``X``, which is the one cost the results
     cache exists to avoid -- so that case gets the cheaper, scan-free
     ``_warn_fractional_allowance_unclassified`` instead (codex-review round 8, P1).
+
+    Inside a ``warn_fractional_allowance_once_per_run`` driver the warning is logged once per run,
+    not once per validated pred piece.
     """
     # Only reached on the permissive path, so the extra integer scan never touches the hot
     # strict path -- and on a baseline arm the matrix is a mean profile, which is cheap.
     if _norm._is_all_integer(adata.X):
         return
+    warned = _fractional_warned.get()
+    if warned:
+        return
+    if warned is not None:
+        _fractional_warned.set(True)
     # Worded to what is KNOWN AT EMISSION (codex-review round 8, P2). Two earlier claims were
     # false: this fires BEFORE `_check_scale_limit_once`, so the run may still refuse after it, and
     # "no rescaling" is wrong for a counts path, which normalizes to `target_sum`.

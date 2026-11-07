@@ -23,6 +23,7 @@ from ._threads import resolve_gather_threads
 from .evaluation_results import FILENAME
 from .h5ad_manifest import plan_pert_batches
 from .io import require_pert_labels
+from .run import warn_fractional_allowance_once_per_run
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -237,19 +238,17 @@ def cell_archive_input_type(archive, *, config=None, strict: bool = False,
     ``gather_threads`` are read.
 
     ⚠️ The peek always autodetects (``autodetect=True``), independent of
-    ``config.autodetect_input_type``. That is deliberate for every cell/shard driver -- the
-    accumulators take no ``input_type`` argument, so a declaration cannot be trusted here -- and
-    it is why ``strict=True`` is a genuine check rather than a tautology: the resolved value comes
-    from the DATA, and ``config.input_type`` is the claim being tested against it.
+    ``config.autodetect_input_type``. That is why ``strict=True`` is a genuine check rather than a
+    tautology: the resolved value comes from the DATA, and ``config.input_type`` is the claim being
+    tested against it.
 
     ``allow_discrete=False`` makes the answer independent of ``config.allow_discrete``, which
     otherwise short-circuits the resolver to "counts" without inspecting a value -- pass it when the
     answer is feeding a safety decision rather than an ordinary read. ``None`` (default) uses the
     config's own value.
 
-    ``strict`` is the CONSUMER's policy, not the drivers'. ``score_cellstream`` deliberately
-    adopts the peeked value over the declaration (``piece_cfg`` below), because it scores whatever
-    space the archive is in. A caller who wants a mismatch to be an error asks for it here.
+    ``score_cellstream`` scores the declared type (``effective_input_type_cell``); this function
+    answers which space the stored values are in.
     """
     from .config import EvalConfig
     cfg = EvalConfig() if config is None else config
@@ -294,8 +293,8 @@ def _resolve_input_type_cell(store, cfg, *, peek_rows: int = 2000,
     ``resolve_input_type`` returns "counts" the moment the flag is set, without looking at a single
     value (its ``if allow_discrete: return "counts"`` short-circuit), so honouring it would let a
     genuinely lognorm archive declare its way through a raw-counts guard (codex-review). Splitting
-    the two here rather than changing the resolver keeps ``score_cellstream`` -- which legitimately
-    handles lognorm and threads the resolved type downstream -- unaffected.
+    the two here rather than changing the resolver keeps ``effective_input_type_cell`` -- which
+    calls this for the pred side under ``autodetect_input_type`` -- unaffected.
     """
     from . import norm as _norm
     stop = min(int(store.n_obs), int(peek_rows))
@@ -307,6 +306,24 @@ def _resolve_input_type_cell(store, cfg, *, peek_rows: int = 2000,
         allow_discrete=cfg.allow_discrete if allow_discrete is None else allow_discrete,
         autodetect=True,
     )
+
+
+def effective_input_type_cell(store, cfg, *, side: str) -> str:
+    """The input type ``score_cellstream`` scores one side of an open cell store with.
+
+    The in-memory rule: the declared ``cfg.input_type``, with no data read. With
+    ``cfg.autodetect_input_type`` the pred side is instead detected from its first 2,000 rows
+    (``_resolve_input_type_cell``; ``cfg.allow_discrete`` then makes it "counts" without inspecting
+    a value), and the real side keeps the declared type. ``side`` is ``"real"`` or ``"pred"``.
+    The store is left open. Under ``version="v1"`` the reference builders detect the type
+    themselves, so the type returned here can differ from the type the scored data gets.
+    """
+    if side not in ("real", "pred"):
+        raise ValueError(f"side must be 'real' or 'pred', got {side!r}")
+    from .run import _effective_autodetect
+    if _effective_autodetect(cfg, side=side):
+        return _resolve_input_type_cell(store, cfg)
+    return cfg.input_type
 
 
 def _uniform_obs(store, col, default) -> str:
@@ -816,12 +833,19 @@ def _run_cell_pass(pred, real, cfg, cell_names, effective_types) -> "pl.DataFram
                 pass
 
 
+@warn_fractional_allowance_once_per_run
 def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_de=False,
                      ground_truth_cache=None, ground_truth_cache_policy="readwrite",
                      check_facts: Callable[[RunFacts], None] | None = None):
     """Score a pair of cell-layout ``.shad`` archives (single context) on the ``partition_inmem``
     engine. Handles counts and lognorm (via the shared in-memory ``compute_de`` + ``_side_bulks``).
     Returns a ``ScoreResult`` (per_pert / per_context / overall). GPU-only (gpudge backend).
+
+    Each side is scored in the declared ``input_type`` (``effective_input_type_cell``); under
+    ``autodetect_input_type`` the pred side is detected instead, by the peek and again per piece.
+    With ``validate_input`` on, a real archive with fractional values under a declared ``counts``
+    is refused with the fix in the message, and ``score_piece`` validates every pred piece
+    (``allow_fractional_counts`` applies).
 
     Cell metrics (``kind == "cell"``, e.g. ``cell_cov_ccc``) score in a separate pass after the
     partitioned loop, on the two archives directly. They need raw counts on both sides, and
@@ -906,10 +930,14 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     )
     from .partition import aggregate_partials
     from .partition_inmem import (
+        _PIECE_FRACTIONAL_FIX,
+        _pred_type_fixes,
+        _real_type_fixes,
         RealDEArtifact,
-        _RefBundle,
         _build_pred_control_reference_core,
         _build_reference_streaming_core,
+        _declared_counts_fix,
+        _RefBundle,
         _require_partition_config,
         score_piece,
     )
@@ -949,6 +977,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     if not isinstance(cfg.metrics, (str, list, tuple)):
         cfg = replace(cfg, metrics=list(cfg.metrics))
     _selected, _ = resolve_metrics(cfg.metrics, version=cfg.version)
+    pred_fix = (_PIECE_FRACTIONAL_FIX, *_pred_type_fixes(cfg, _selected))
     cell_names = [n for n in _selected if CATALOG[n].kind == "cell"]
     if cell_names:
         rest = [n for n in _selected if CATALOG[n].kind != "cell"]
@@ -1011,7 +1040,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
             _t0 = perf_counter()
             gt_fp = fingerprint_ground_truth_cell_archive(real_store, pert_col=cfg.pert_col)
             fingerprint_seconds = perf_counter() - _t0
-        real_itype = _resolve_input_type_cell(real_store, cfg)
+        real_itype = effective_input_type_cell(real_store, cfg, side="real")
         dataset_tag = _uniform_obs(real_store, "dataset", "cellstream")
         context_tag = _uniform_obs(real_store, "context", "all")
         n_genes = int(real_store.n_vars) if cell_names else None
@@ -1020,7 +1049,7 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
     pred_store = open_cell_store(pred)
     try:
         require_pert_labels(pred_store.obs[cfg.pert_col], cfg.pert_col, side="pred")
-        pred_itype = _resolve_input_type_cell(pred_store, cfg)
+        pred_itype = effective_input_type_cell(pred_store, cfg, side="pred")
     finally:
         pred_store.close()
     comparator = _norm.resolve_comparator(
@@ -1042,7 +1071,8 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
         cell_types = {"pred": pred_itype, "real": real_itype}
         _check_cell_pass_inputs(cell_names, cell_types, n_genes=n_genes, mem_budget=mem_budget,
                                 device=_cache_device(cell_cfg))
-        _precheck_cell_pass(pred, real, cell_cfg, cell_names, cell_types)
+        with _declared_counts_fix("pred", *pred_fix):
+            _precheck_cell_pass(pred, real, cell_cfg, cell_names, cell_types)
 
     # The real-DE provider, handed to the reference builder ONLY while the cache is on (spec §6,
     # ruling 6). It keys the lookup with the semantic document built from what this run resolved,
@@ -1099,10 +1129,11 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                             f"the real archive {os.fspath(real)!r} changed while this run read "
                             f"it: ground-truth fingerprint {gt_fp.sha256} at the first open, "
                             f"{fp_again.sha256} at the second. Nothing was computed or cached.")
-                ref_manifest = _build_reference_streaming_core(
-                    real_src, config=cfg, cache_dir=ref_dir, mem_budget=mem_budget,
-                    input_type=real_itype, native_gpu_normalize=True, comparator=comparator,
-                    real_de_provider=_real_de_provider if gt_cache_on else None)
+                with _declared_counts_fix("real", *_real_type_fixes(_selected)):
+                    ref_manifest = _build_reference_streaming_core(
+                        real_src, config=cfg, cache_dir=ref_dir, mem_budget=mem_budget,
+                        input_type=real_itype, native_gpu_normalize=True, comparator=comparator,
+                        real_de_provider=_real_de_provider if gt_cache_on else None)
             finally:
                 real_src.close()
             if gt_cache_on:
@@ -1121,9 +1152,10 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                 pc_src = CellBatchSource(pred, pert_col=cfg.pert_col, control=control,
                                          gather_threads=cfg.gather_threads)
                 try:
-                    _build_pred_control_reference_core(pc_src, config=cfg, cache_dir=ref_dir,
-                                                       input_type=pred_itype,
-                                                       comparator=comparator)
+                    with _declared_counts_fix("pred", *pred_fix):
+                        _build_pred_control_reference_core(pc_src, config=cfg, cache_dir=ref_dir,
+                                                           input_type=pred_itype,
+                                                           comparator=comparator)
                 finally:
                     pc_src.close()
 
@@ -1144,13 +1176,16 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
                     # #412 / design §6.4: CellBatchSource yields prediction labels, without control.
                     scored_labels.update(map(str, batch_perts))
                     piece_id = f"ctx_{k}"
-                    score_piece(batch_ad, ref_dir, config=piece_cfg,
-                                piece_id=piece_id, partial_out=parts_dir, bundle=bundle,
-                                comparator=comparator,
-                                de_out=de_parts_dir if write_de else None,
-                                # counts -> gpudge normalizes on-GPU (skips the CPU _to_linear copy,
-                                # issue #142); lognorm falls through to _to_linear inside compute_de.
-                                native_gpu_normalize=True)
+                    # score_piece names the side and the allow_fractional_counts fix itself.
+                    with _declared_counts_fix(None, *_pred_type_fixes(cfg, _selected)):
+                        score_piece(batch_ad, ref_dir, config=piece_cfg,
+                                    piece_id=piece_id, partial_out=parts_dir, bundle=bundle,
+                                    comparator=comparator,
+                                    de_out=de_parts_dir if write_de else None,
+                                    # counts -> gpudge normalizes on-GPU (skips the CPU _to_linear
+                                    # copy, issue #142); lognorm falls through to _to_linear inside
+                                    # compute_de.
+                                    native_gpu_normalize=True)
                     if write_de:
                         pred_parts.append(
                             os.path.join(de_parts_dir, f"{piece_id}__de_pred.parquet"))
@@ -1178,7 +1213,10 @@ def score_cellstream(pred, real, *, config=None, mem_budget, outdir=None, write_
 
             # The cell pass, before anything is staged: a failure here leaves outdir untouched.
             if cell_names:
-                cell_rows = _run_cell_pass(pred, real, cell_cfg, cell_names, cell_types)
+                # The real side was validated under the same gate (by the builder, or by the run
+                # that wrote the cache entry), so a fractional refusal here is the pred side's.
+                with _declared_counts_fix("pred", *pred_fix):
+                    cell_rows = _run_cell_pass(pred, real, cell_cfg, cell_names, cell_types)
                 full = pl.concat([full, cell_rows], how="vertical")
 
             # #412 / design §8.2–8.3: only None is resolved by the manifest; its float storage

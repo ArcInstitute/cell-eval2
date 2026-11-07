@@ -237,8 +237,8 @@ def _grouped_sums(X, order, bounds, n_groups) -> np.ndarray:
        ABSOLUTE (``rtol=0, atol=1e-6``) and the gate refuses THAT matrix. The arithmetic is unchanged
        and the route stays listed, because it is still reachable three ways: with
        ``allow_fractional_counts=True``, which every tiled baseline leg sets; with a deviation inside
-       1e-6, which the gate accepts by design; and through ``partition_inmem.score_piece`` or the
-       direct shard drivers, which never call ``validate_input_type`` at all.
+       1e-6, which the gate accepts by design; and through the direct shard drivers, which never
+       call ``validate_input_type`` at all.
     3. **A NARROW dtype moves far below fp32's boundary.** float16 counts are exact only to 2,048
        and nothing rejects them -- ``validate_input_type`` checks sign and integrality, not width.
        MEASURED: a dense float16 ``[[2048, 1], [1, 1]]`` passes both gates, sums to 2,049 wide

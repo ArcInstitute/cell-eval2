@@ -24,6 +24,7 @@ or the streaming path (``scale.py``) instead.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -57,6 +58,68 @@ logger = logging.getLogger(__name__)
 
 _CONTROL_FORMATS = ("shad", "h5ad")
 _TIDY_SCHEMA = {"perturbation": pl.Utf8, "metric": pl.Utf8, "value": pl.Float64}
+
+#: ``norm.validate_input_type``'s refusal of fractional values under a declared ``counts``.
+_FRACTIONAL_COUNTS = "declared input_type='counts' but values are fractional"
+_PIECE_FRACTIONAL_FIX = (
+    "If the prediction holds fractional expected counts (for example a mean baseline), set "
+    "allow_fractional_counts=True; that setting is for fractional expected counts, never for "
+    "log-normalized data."
+)
+_REAL_FRACTIONAL_FIX = 'If the archive holds log-normalized values, declare input_type="lognorm".'
+_PRED_TYPE_FIX = (
+    'input_type is one setting for both sides: declare input_type="lognorm" if both sides are '
+    "lognorm"
+)
+_CELL_COUNTS_FIX = (
+    "The cell metrics score raw counts only: to score log-normalized data, deselect the cell "
+    "metrics."
+)
+
+
+def _has_cell_metrics(selected) -> bool:
+    return any(CATALOG[n].kind == "cell" for n in selected)
+
+
+def _real_type_fixes(selected) -> tuple[str, ...]:
+    """The real-side hint on the declared ``input_type``, for the resolved metric names
+    ``selected``. Declaring ``lognorm`` would fail the cell metrics' raw-counts gate."""
+    return (_CELL_COUNTS_FIX,) if _has_cell_metrics(selected) else (_REAL_FRACTIONAL_FIX,)
+
+
+def _pred_type_fixes(cfg, selected) -> tuple[str, ...]:
+    """The pred-side hint on the shared ``input_type``, for the resolved metric names ``selected``.
+
+    Empty under ``autodetect_input_type``, where the pred type already comes from the data and
+    ``_PIECE_FRACTIONAL_FIX`` is the hint. With cell metrics selected, neither ``lognorm`` nor
+    autodetect would pass their raw-counts gate, so the hint says to deselect them. Otherwise the
+    hint suggests autodetect only where autodetect would not refuse again: not under
+    ``allow_discrete`` (it types the pred side "counts"), and not for DE metrics under
+    ``control_source="real"`` (a pred side typed apart from the real side is the mixed-space
+    refusal).
+    """
+    if cfg.autodetect_input_type:
+        return ()
+    if _has_cell_metrics(selected):
+        return (_CELL_COUNTS_FIX,)
+    de_vs_real =cfg.control_source == "real" and any(CATALOG[n].kind == "de" for n in selected)
+    if cfg.allow_discrete or de_vs_real:
+        return (_PRED_TYPE_FIX + ".",)
+    return (_PRED_TYPE_FIX + "; otherwise set autodetect_input_type=True.",)
+
+
+@contextlib.contextmanager
+def _declared_counts_fix(side: str | None, *fixes: str):
+    """Re-raise a ``ValueError`` whose message starts with ``_FRACTIONAL_COUNTS`` with
+    `` (<side> side).`` when ``side`` is given, then ``fixes``. Every other exception,
+    ``ScaleLimitError`` included, passes through unchanged."""
+    try:
+        yield
+    except ValueError as e:
+        if not str(e).startswith(_FRACTIONAL_COUNTS):
+            raise
+        where = "" if side is None else f" ({side} side)."
+        raise ValueError(" ".join((f"{e}{where}", *fixes))) from e
 
 
 class PertBatchSource(Protocol):
@@ -355,8 +418,9 @@ def _check_control_space(cache_dir, cfg: EvalConfig, manifest, *, piece_eff: str
     (codex-review round 3). Under ``"pred"`` the bundle hands ``compute_de`` ``pred_control.h5ad``,
     NOT the real control -- so comparing against the real side's ``effective_input_type`` would
     refuse a supported mixed pair whose pred control matches its pieces (``score_cellstream`` can
-    produce exactly that, since it resolves both sides independently), while letting a STALE pred
-    control in a different space through whenever the real side happened to match.
+    produce exactly that under ``autodetect_input_type``, which types the pred side from data and
+    the real side by declaration), while letting a STALE pred control in a different space through
+    whenever the real side happened to match.
 
     The needed key must be PRESENT: a ``.get()`` returning None and skipping the comparison is the
     same fail-open that round 2's semantics loop shipped. A bundle predating the key is refused with
@@ -1203,7 +1267,9 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
 
     Raises ``ValueError`` if the piece contains control cells (``cfg.control`` in
     ``obs[cfg.pert_col]``) or perturbations outside ``reference.json``'s
-    ``perturbation_universe``. When ``partial_out`` is set, writes
+    ``perturbation_universe``. With ``validate_input`` on, the piece is validated against its
+    effective input type (``allow_fractional_counts`` applies) and ``max_counts_per_cell`` before
+    scoring, as the reference builders validate the real side. When ``partial_out`` is set, writes
     ``{piece_id}.parquet`` + ``{piece_id}.json`` (meta with ``perturbations``);
     ``piece_id`` defaults to the pred file stem for a path input and otherwise must
     be given explicitly (an in-memory AnnData has no file stem -- PR #83 review).
@@ -1229,7 +1295,8 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
     """
     from dataclasses import replace as _replace
 
-    from .run import _effective_input_type
+    from .run import (_check_scale_limit_once, _effective_input_type, _val_allow_fractional,
+                      _validate_input_once)
 
     # Both sinks name files after piece_id, so resolve and check it ONCE, before any work: the
     # file-stem default must apply to de_out as well as partial_out, and an id with a directory
@@ -1330,6 +1397,12 @@ def score_piece(pred_piece, cache_dir, *, config, piece_id=None, partial_out=Non
         # control_source='real' there is no pred control block and no pred bundle to anchor on
         # (spec section 8 records that residual).
         piece_eff = _effective_input_type(piece_mat, cfg, side="pred")
+        if cfg.validate_input:
+            if cfg.version != "v1":
+                with _declared_counts_fix("pred", _PIECE_FRACTIONAL_FIX):
+                    _validate_input_once(piece_mat, piece_eff,
+                                         allow_fractional=_val_allow_fractional(cfg, side="pred"))
+            _check_scale_limit_once(piece_mat, piece_eff, cfg.max_counts_per_cell)
         # ⚠️ #181/#193's seam. codex-review round 2 found it is not merely unverified but ACTIVELY
         # WRONG: `piece_eff` is the PREDICTION's effective type, and it is handed to compute_de
         # together with the bundle's cached CONTROL -- so on a mixed pair the control gets the

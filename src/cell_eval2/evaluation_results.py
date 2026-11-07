@@ -143,7 +143,7 @@ def _direct_url() -> str | None:
 
 
 def suite_commit() -> str | None:
-    """Use the engine record's immutable-commit rule for the suite (#412, design §6.2)."""
+    """Accept only an immutable commit for the suite, never a metadata URL (#412, design §6.2)."""
     from .settings import vcs_commit
     return vcs_commit(_direct_url())
 

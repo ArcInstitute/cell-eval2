@@ -23,7 +23,7 @@ import polars as pl
 from . import norm as _norm
 from .config import EvalConfig
 from .io import require_pert_labels
-from .run import _close_backed
+from .run import _close_backed, warn_fractional_allowance_once_per_run
 
 
 @dataclass(frozen=True)
@@ -354,6 +354,7 @@ def _assemble_score_result(per_pert_frames) -> ScoreResult:
     return ScoreResult(per_pert=per_pert, per_context=per_context, overall=overall)
 
 
+@warn_fractional_allowance_once_per_run
 def score_h5ad_manifest(manifest, *, config=None, mem_budget, outdir=None) -> ScoreResult:
     """Score every (dataset, panel, context) artifact in an h5ad manifest out-of-core.
 

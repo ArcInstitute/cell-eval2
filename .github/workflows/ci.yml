@@ -96,3 +96,60 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # After the fence is closed, not before: a broken report should be visible AND red.
           exit "${status:-0}"
+
+  # Metric values of this PR against its base: a FAIL turns the job red but blocks no merge.
+  # The release drift run against the previous tag stays mandatory.
+  metric-drift:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the check archives the PR's base commit
+      # ⚠️ Guarded like the gate-manifest steps: the drift check is internal and absent from the
+      # public tree copy, where this job does only the checkout and this step (#335).
+      - name: Drift check present
+        id: drift
+        run: |
+          if [ -f tools/metric_drift/drift_check.py ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no tools/metric_drift/drift_check.py here -- the drift check does not ship to this tree; nothing to check (no-op, exit 0)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: astral-sh/setup-uv@v5
+        if: steps.drift.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+      - if: steps.drift.outputs.run == 'true'
+        run: uv pip install -e . --group dev
+      - name: Metric drift against the PR base
+        if: steps.drift.outputs.run == 'true'
+        run: |
+          out="$RUNNER_TEMP/drift"
+          .venv/bin/python tools/metric_drift/drift_check.py --pr \
+            --base "${{ github.event.pull_request.base.sha }}" --head HEAD --out "$out" || status=$?
+          if [ -f "$out/report.md" ]; then
+            cat "$out/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Metric drift: no report (exit ${status:-0})"
+              for log in base.log head.log; do
+                [ -f "$out/$log" ] || continue
+                echo "Last 30 lines of $log:"
+                echo '```'
+                tail -n 30 "$out/$log"
+                echo '```'
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "${status:-0}"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.drift.outputs.run == 'true'
+        with:
+          name: metric-drift
+          path: |
+            ${{ runner.temp }}/drift
+            !${{ runner.temp }}/drift/trees
+          if-no-files-found: error

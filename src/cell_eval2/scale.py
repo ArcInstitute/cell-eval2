@@ -580,7 +580,8 @@ def score_streaming_cell(pred, real, *, config, subset=None, fraction=None, inde
         # value -- so a config declaring counts over lognorm archives walked straight through it
         # and the values were silently mis-normalized, which is exactly what that gate's own
         # message says must not happen. Check the EFFECTIVE type of both archives too, using the
-        # same peek the cellstream driver uses. Deliberately AFTER the declared check so a caller
+        # peek of `cellstream._resolve_input_type_cell` (`score_cellstream` peeks only under
+        # autodetect_input_type). Deliberately AFTER the declared check so a caller
         # who declared lognorm still gets the "counts-only, use the materialize path" message
         # rather than a data-shaped one, and after the stores are open so it costs one 2k-row peek
         # per side rather than a second open.

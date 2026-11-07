@@ -742,7 +742,8 @@ def test_under_control_source_pred_the_PRED_controls_space_is_what_is_checked(tm
     compared against the real side's `effective_input_type`, would:
 
       * REFUSE a supported mixed pair whose pred control matches its pieces (`score_cellstream`
-        produces exactly that, resolving both sides independently); and
+        produces exactly that under `autodetect_input_type`, which types the pred side from data
+        and the real side by declaration); and
       * ACCEPT a stale pred control in a different space whenever the real side happened to match.
 
     Both directions are pinned here.

@@ -1,16 +1,19 @@
 import dataclasses
 import json
 from decimal import Decimal
+from importlib.metadata import PackageNotFoundError
 
 import numpy as np
 import pytest
 
-from cell_eval2 import settings
-from cell_eval2.baseline import DIGEST_EXEMPT_FIELDS, config_digest
+from cell_eval2 import baseline, settings
+from cell_eval2.baseline import DIGEST_EXEMPT_FIELDS, _environment_record, config_digest
 from cell_eval2.config import DEParams, EvalConfig, FilterParams
 from cell_eval2.run import RunFacts, _compute_metrics_with_facts
 from cell_eval2.settings import (FACT_PATHS, NO_NEUTRAL, NOT_RECORDED, SETTINGS,
-                                 build_settings, check_recordable, engine_record)
+                                 SettingsMismatch, build_settings, check_facts,
+                                 check_recordable, engine_record, facts_checker,
+                                 recorded_facts, vcs_commit)
 from _edge_fixtures import config, scenario
 
 KEYS_0_20_0 = {
@@ -68,7 +71,7 @@ def test_settings_hold_exactly_the_registry_keys():
     assert {_dotted(p) for p in _leaves(s)} == {_dotted(k.path) for k in SETTINGS}
     assert not ({"input_type", "metrics"} | DIGEST_EXEMPT_FIELDS) & set(s)
     assert s["target_gene_map"] is None and s["scoring_path"] == "in_memory"
-    assert s["de"]["engine"] == engine_record("pdex") and s["de"]["backend"] == "pdex"
+    assert s["de"]["engine"] == "pdex" and s["de"]["backend"] == "pdex"
     assert build_settings(_facts(de_backend_used=False, de_backend="auto"))["de"]["engine"] is None
 
 
@@ -81,7 +84,7 @@ def test_supplied_real_de_preserves_configured_backend_and_resolved_engine():
     facts = _facts(config=EvalConfig(de=DEParams(backend="auto")), de_real_computed=False)
     s = build_settings(facts)
     assert s["de"]["backend"] == "auto"
-    assert s["de"]["engine"] == engine_record("pdex")
+    assert s["de"]["engine"] == "pdex"
 
 
 @pytest.mark.parametrize("field,value", [("pert_chunk", np.int64(32)),
@@ -139,36 +142,122 @@ def test_a_resolved_target_sum_equals_the_same_number_asked_for():
     assert build_settings(f1) == build_settings(f2)
 
 
-def test_device_engine_version_and_provenance_each_change_the_settings(monkeypatch):
+class _FakeDist:
+    """The slice of ``importlib.metadata.Distribution`` that settings and provenance read."""
+
+    def __init__(self, version, direct_url=None):
+        self.version = version
+        self._direct_url = direct_url
+
+    def read_text(self, name):
+        return None if self._direct_url is None else json.dumps(self._direct_url)
+
+
+def _git(commit):
+    return {"url": "x", "vcs_info": {"vcs": "git", "commit_id": commit}}
+
+
+_ENGINE_VARIANTS = [
+    ("0.0.1", None, "release", None),
+    ("9.9.9", None, "release", None),
+    ("0.0.1", {"url": "x", "dir_info": {"editable": True}}, "local-editable", None),
+    ("0.0.1", _git("a" * 40), "git", "a" * 40),
+    ("0.0.1", _git("b" * 40), "git", "b" * 40),
+]
+
+
+def _differing_paths(a, b):
+    return {_dotted(p) for p in _leaves(a) if settings._get(a, p) != settings._get(b, p)}
+
+
+def test_an_engine_version_provenance_or_commit_does_not_change_the_settings(monkeypatch):
     base = build_settings(_facts())
-    assert build_settings(_facts(device="cuda")) != base
-    monkeypatch.setattr(settings, "_package_provenance",
-                        lambda name: {"version": "0.0.0", "provenance": "release"})
-    v = build_settings(_facts())
-    monkeypatch.setattr(settings, "_package_provenance",
-                        lambda name: {"version": "0.0.0", "provenance": "local-editable"})
-    assert v != base and build_settings(_facts()) != v
+    for version, direct_url, provenance, commit in _ENGINE_VARIANTS:
+        monkeypatch.setattr(baseline.Distribution, "from_name", staticmethod(
+            lambda name, v=version, d=direct_url: _FakeDist(v, d)))
+        # The environment record sees the variant, so the equality below is not vacuous.
+        assert _environment_record("pdex")["pdex"] == {"version": version,
+                                                       "provenance": provenance}
+        assert vcs_commit(settings._direct_url("pdex")) == commit
+        assert build_settings(_facts()) == base
 
 
-def test_two_commits_of_one_engine_version_are_different_settings(monkeypatch):
-    monkeypatch.setattr(settings, "_package_provenance",
-                        lambda name: {"version": "0.0.0", "provenance": "git"})
-    def git(commit):
-        return json.dumps({"url": "x", "vcs_info": {"vcs": "git", "commit_id": commit}})
-    monkeypatch.setattr(settings, "_direct_url", lambda dist: git("a" * 40))
-    a = build_settings(_facts())
-    monkeypatch.setattr(settings, "_direct_url", lambda dist: git("b" * 40))
-    b = build_settings(_facts())
-    assert a["de"]["engine"]["commit"] == "a" * 40 and a != b       # the fact check tells them apart
-    monkeypatch.setattr(settings, "_direct_url",
-                        lambda dist: json.dumps({"url": "x", "dir_info": {"editable": True}}))
-    assert build_settings(_facts())["de"]["engine"]["commit"] is None   # editable: not identifiable
+@pytest.mark.parametrize("error", [RuntimeError("unreadable"), PackageNotFoundError("pdex")])
+def test_the_engine_name_is_recorded_without_any_metadata_lookup(monkeypatch, error):
+    def boom(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(baseline.Distribution, "from_name", staticmethod(boom))
+    monkeypatch.setattr(settings, "_direct_url", boom)
+    assert build_settings(_facts())["de"]["engine"] == "pdex"
 
 
-def test_engine_record_names_the_distribution_never_a_path():
-    rec = engine_record("pdex")
-    assert set(rec) == {"name", "version", "provenance", "commit"} and rec["name"] == "pdex"
-    assert "/" not in json.dumps(rec)
+def test_a_different_engine_name_or_device_changes_the_settings():
+    base = build_settings(_facts(de_real_computed=False))
+    other = build_settings(_facts(de_backend="scanpy", de_real_computed=False))
+    assert other["de"]["engine"] == "scanpy"
+    assert _differing_paths(base, other) == {"de.engine"}
+    assert build_settings(_facts(device="cuda")) != build_settings(_facts())
+
+
+@pytest.mark.parametrize("backend, distribution", [("gpudge", "gpudge"), ("pdex", "pdex"),
+                                                   ("scanpy", "scanpy"), ("deseq2", "deseq2_gpu")])
+def test_engine_record_is_the_distribution_name(backend, distribution):
+    assert engine_record(backend) == distribution
+
+
+_OLD_ENGINE = {"name": "pdex", "version": "0.0.1", "provenance": "git", "commit": "a" * 40}
+
+
+def _expected_facts(engine):
+    expected = recorded_facts(build_settings(_facts()))
+    expected["de.engine"] = engine
+    return expected
+
+
+@pytest.mark.parametrize("engine", [
+    "pdex",
+    _OLD_ENGINE,
+    {**_OLD_ENGINE, "version": "9.9.9", "provenance": "release", "commit": None},
+    {"name": "pdex"},
+])
+def test_replay_accepts_an_engine_of_the_same_name_in_either_shape(engine):
+    check_facts(_expected_facts(engine), _facts())
+
+
+@pytest.mark.parametrize("engine", [
+    "scanpy",
+    {**_OLD_ENGINE, "name": "scanpy"},
+    None,
+    {"version": "0.0.1", "provenance": "release"},
+    {"name": 1},
+])
+def test_replay_refuses_an_engine_of_another_name(engine):
+    with pytest.raises(SettingsMismatch, match="de.engine"):
+        check_facts(_expected_facts(engine), _facts())
+
+
+def test_replay_refuses_an_engine_where_none_ran_and_the_reverse():
+    none_ran = _facts(de_backend_used=False, de_backend="auto")
+    with pytest.raises(SettingsMismatch, match="de.engine: expected 'pdex', got None"):
+        check_facts(_expected_facts("pdex"), none_ran)
+    with pytest.raises(SettingsMismatch, match="de.engine: expected None, got 'pdex'"):
+        check_facts(_expected_facts(None), _facts())
+    check_facts(_expected_facts(None), none_ran)
+
+
+def test_the_refusal_prints_the_engine_name_of_an_old_expected_object():
+    with pytest.raises(SettingsMismatch) as exc:
+        check_facts(_expected_facts({**_OLD_ENGINE, "name": "scanpy"}), _facts())
+    assert "de.engine: expected 'scanpy', got 'pdex'" in str(exc.value)
+
+
+def test_facts_checker_replays_a_document_that_holds_the_old_engine_object():
+    doc = {"suite": {"settings": build_settings(_facts())}}
+    doc["suite"]["settings"]["de"]["engine"] = _OLD_ENGINE
+    facts_checker(doc)(_facts())
+    with pytest.raises(SettingsMismatch, match="de.engine"):
+        facts_checker(doc)(_facts(de_backend="scanpy"))
 
 
 def test_a_non_string_target_gene_label_is_refused():

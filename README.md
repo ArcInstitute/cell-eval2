@@ -60,7 +60,7 @@ Both are public Arc packages on PyPI. Both are optional; neither is needed for t
   cell_eval2 reads its **cell layout** (`.csad`, one row group per perturbation).
   ⚠️ Prebuilt wheels cover **CPython 3.11 and 3.12 only**; on 3.13 the resolver falls through to
   the source distribution and needs a Rust toolchain, so prefer 3.11/3.12 for this extra.
-- **[`gpudge`](https://github.com/ArcInstitute/gpudge)** (`[gpudge]`, `>=0.9.0`) — the GPU
+- **[`gpudge`](https://github.com/ArcInstitute/gpudge)** (`[gpudge]`, pinned exactly; see `pyproject.toml`) — the GPU
   differential-expression engine. It computes fold changes and p-values on-GPU, and is what
   `de.backend="auto"` selects when a CUDA device is present. Kept separate from `[gpu]` because it
   pulls `torch`, which most users of the kernels do not want.
@@ -194,8 +194,13 @@ print(res.overall)     # per_pert / per_context / overall frames
   `replace_zero` at `1e-10`, which could rank a p-value of `1e-100` below `1e-20`; set
   `de.auc_pval_floor="replace_zero"` and `de.auc_pval_floor_value=1e-10` to reproduce those
   numbers.
-- Handles counts and lognorm across the whole config matrix; `input_type` is auto-detected from
-  the archive.
+- Handles counts and lognorm across the whole config matrix. Both sides are scored in the
+  declared `input_type`, as in `compute_metrics`; with `autodetect_input_type` the prediction's
+  type is detected from its first 2,000 rows and the real side keeps the declared type
+  (`effective_input_type_cell`). With `validate_input` on (the default), a real archive with
+  fractional values under a declared `counts` is refused, and the message names the fix. Every
+  prediction batch is value-checked before it is scored; `allow_fractional_counts` lets
+  fractional expected counts, such as a mean baseline, through.
 - Also scores the cell metrics (`cell_cov_ccc`, `cell_cov_corr`, `cell_cov_eig_ratio`), selected
   by name next to a selection the first bullet allows (no moments metric, and both nsig-count
   metrics with `de_wilcoxon_nsig_spearman`), in a separate pass after the partitioned loop (a
@@ -207,8 +212,9 @@ print(res.overall)     # per_pert / per_context / overall frames
   construct-ID panel needs `target_gene_map`); and, with `validate_input` on and a version other
   than v1, the value check on the predicted cells the pass would sample for the first such
   perturbation. With those settings the pass still value-checks every block of cells it reads.
-  With `allow_discrete`, an archive resolves to counts without reading a value; the value checks
-  still run. The pass logs one `cell pass:` line with its wall time and GPU peaks.
+  `allow_discrete` has no effect under a declared type; under `autodetect_input_type` it makes
+  the prediction counts without reading a value, and the value checks still run. The pass logs
+  one `cell pass:` line with its wall time and GPU peaks.
 - Materializes perturbation-complete batches under an explicit memory budget.
 - The control label comes from a uniform `obs.control_value` column when the archive has one,
   otherwise from `EvalConfig.control` — so set it explicitly if your archive lacks that column.
@@ -257,6 +263,19 @@ label, effective input types, comparator, DE engine or scoring path. A streaming
 refused by the CLI because its `scoring_path` differs; replay it through
 `score_cellstream(config=settings_to_config(doc), check_facts=facts_checker(doc), ...)`, using
 `settings_to_config` and `facts_checker` exported from `cell_eval2`.
+
+`suite.settings.de.engine` is the distribution name of the DE engine (`gpudge`, `pdex` or
+`scanpy`), or `null` when no DE ran. A `deseq2` run writes no document. The engine's version and
+provenance are not settings. `run_meta.json` from `cell-eval2 run` records them in its
+`environment` block when it computes the real DE table, and so does the `baseline_meta.json` of a
+real bundle that computes its real DE table (a supplied `de_real` records none). The
+`score_cellstream` document and the `cell-eval2 baseline` meta record the engine name only.
+`compute_metrics(..., outdir=...)` writes no document: its `run_params.yaml` holds the configured
+`de.backend`, which can be `auto`, not the resolved engine. The engine's commit is not recorded.
+Only gpudge is pinned: pdex and scanpy versions are not pinned and not checked on replay, and only
+`run_meta.json` and `baseline_meta.json` record them. Replay compares engine names: a document
+from cell_eval2 0.21.0 or earlier holds an object in `de.engine`, and it replays by that object's
+`name`. Those releases cannot replay a document that holds the name string.
 
 ## Caching
 

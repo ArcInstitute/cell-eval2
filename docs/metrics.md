@@ -2862,9 +2862,9 @@ back, because a per-cell library size cannot be recovered from an already-normal
 With `validate_input` on and a version other than v1, every block of cells these metrics read
 passes the same checks the in-memory path runs on a whole matrix (negative values, fractional
 counts outside `allow_fractional_counts`, `max_counts_per_cell`) — on `compute_metrics`' archive
-path the only validation those cells get, and on `score_cellstream` the only one its predicted
-perturbed cells get (the check also runs before any DE runs, on the cells the pass would sample
-for the first perturbation with at least $50$ cells at the common depth).
+path the only validation those cells get. On `score_cellstream` the check also runs before any
+DE runs, on the cells the pass would sample for the first perturbation with at least $50$ cells
+at the common depth.
 
 ### 8.2 `cell_cov_corr`, `cell_cov_eig_ratio` — responding-gene covariance (B4)
 

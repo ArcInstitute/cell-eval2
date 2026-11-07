@@ -27,6 +27,7 @@ from ._sparse import SPARSE_DENSITY_MAX, estimate_density, scaled_log1p_csr, to_
 from . import norm as _norm
 from .config import EvalConfig
 from .io import require_pert_labels
+from .run import warn_fractional_allowance_once_per_run
 from .norm import resolve_target_sum
 
 
@@ -207,6 +208,7 @@ def _resolve_artifact_target_sum(art, cfg) -> float:
     return resolve_target_sum(probe.read_control_block(), input_type="counts", target_sum=None)
 
 
+@warn_fractional_allowance_once_per_run
 def score_rowstore(staging_dir, *, config=None, mem_budget, output_space="scaled_log1p",
                    outdir=None):
     """Score every (dataset, panel, context) artifact in a ROW STORE out-of-core.

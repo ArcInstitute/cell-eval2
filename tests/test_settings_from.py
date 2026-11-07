@@ -1,15 +1,18 @@
 """Replay preserves recorded identity and refuses drift (#412, design §9)."""
 import dataclasses
+import importlib.metadata
 import json
 import pathlib
 import types
 
 import pytest
 
+import cell_eval2.baseline as baseline
 import cell_eval2.cli as cli
 import cell_eval2.run as run
 import cell_eval2.settings as settings
 from cell_eval2.catalog import CATALOG, resolve_metrics
+from cell_eval2.de_compute import _BACKEND_MODULE
 from cell_eval2.evaluation_results import FILENAME, load_document
 from cell_eval2.settings import SETTINGS, settings_to_config
 from _edge_fixtures import config, scenario
@@ -61,6 +64,29 @@ def test_replay_reproduces_settings_and_values(first, tmp_path):
             for d in (pathlib.Path(first.doc).parent, tmp_path / "o")]
     assert meta[0]["config_digest"] == meta[1]["config_digest"]      # same run identity
     _assert_same_values(a, b)
+
+
+def test_a_document_from_0_21_0_or_earlier_replays_by_engine_name(first, tmp_path):
+    """Its `de.engine` is an object; replay compares the name whatever else it holds."""
+    original = load_document(first.doc)["suite"]["settings"]
+    assert original["de"]["engine"] == "pdex"
+    doc = load_document(first.doc)
+    doc["suite"]["settings"]["de"]["engine"] = {
+        "name": "pdex", "version": "0.0.1", "provenance": "git", "commit": "a" * 40}
+    (tmp_path / "d.json").write_text(json.dumps(doc), encoding="utf-8")
+    cli.main(["run", "-ap", first.pred, "-ar", first.real, "-o", str(tmp_path / "o"),
+              "--settings-from", str(tmp_path / "d.json")])
+    assert load_document(tmp_path / "o" / FILENAME)["suite"]["settings"] == original
+
+
+def test_the_document_names_the_engine_and_run_meta_carries_its_version(first):
+    """Version and provenance live in `run_meta.json`'s environment, not in `settings`."""
+    meta = json.loads((pathlib.Path(first.doc).parent / "run_meta.json").read_text())
+    backend = meta["resolved_de_backend"]
+    distribution = _BACKEND_MODULE[backend]
+    assert load_document(first.doc)["suite"]["settings"]["de"]["engine"] == distribution
+    assert meta["environment"][backend] == baseline._package_provenance(distribution)
+    assert meta["environment"][backend]["version"] == importlib.metadata.version(distribution)
 
 
 def test_supplied_real_de_replays_auto_backend_with_the_same_digest(first, tmp_path):
@@ -213,7 +239,9 @@ def test_a_missing_document_exits_cleanly(first, tmp_path):
     ("scoring_path", "streaming"),
     ("input_type_pred", "lognorm"),
     ("comparator", "lognorm"),
-    ("de.engine", {"name": "pdex", "version": "0.0.0", "provenance": "release"}),
+    ("de.engine", "scanpy"),
+    ("de.engine", {"name": "scanpy", "version": "0.0.0", "provenance": "release"}),
+    ("de.engine", None),
 ])
 def test_a_differing_fact_is_refused_before_any_metric_runs(first, tmp_path, monkeypatch, path, value):
     doc = load_document(first.doc)
@@ -296,6 +324,11 @@ def test_check_facts_names_every_difference_and_both_values(first):
         settings.check_facts(expected, facts)
     for path in settings.FACT_PATHS:
         assert f"{path}: expected {expected[path]!r}, got {actual[path]!r}" in str(exc.value)
+    old_object = {"name": "different_de.engine", "version": "0.0.0", "provenance": "release",
+                  "commit": None}
+    with pytest.raises(settings.SettingsMismatch) as exc:
+        settings.check_facts({**expected, "de.engine": old_object}, facts)
+    assert f"de.engine: expected 'different_de.engine', got {actual['de.engine']!r}" in str(exc.value)
 
 
 def test_settings_from_refuses_a_metric_override_before_scoring(first, tmp_path, monkeypatch):

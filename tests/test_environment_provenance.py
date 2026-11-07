@@ -9,6 +9,7 @@ offending value exists only at runtime.
 """
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 
@@ -343,6 +344,28 @@ def test_environment_is_absent_from_the_compared_and_recorded_tuples():
     from cell_eval2.real_bundle import MANIFEST_RECORDED_ONLY, SUBMISSION_PEERS
 
     assert "environment" not in SUBMISSION_PEERS + MANIFEST_RECORDED_ONLY
+
+def test_a_real_bundle_baseline_meta_carries_the_resolved_engine_version(counts_bundle_inputs,
+                                                                         tmp_path):
+    """`settings.de.engine` names the engine only; its version and provenance live here."""
+    from dataclasses import replace
+
+    from cell_eval2.config import EvalConfig
+    from cell_eval2.de_compute import _BACKEND_MODULE
+    from cell_eval2.real_bundle import build_real_bundle
+
+    baseline_pred, real, _sub = counts_bundle_inputs
+    root = str(tmp_path / "b")
+    build_real_bundle(real, baseline_pred, config=replace(EvalConfig.from_preset("vcc2026")),
+                      outdir=root, bundle_id="engine-version-test")
+    with open(os.path.join(root, "baseline_meta.json"), encoding="utf-8") as fh:
+        meta = json.load(fh)
+    backend = meta["resolved_de_backend"]
+    assert backend is not None
+    assert meta["environment"][backend] == _package_provenance(_BACKEND_MODULE[backend])
+    assert meta["environment"][backend]["version"] == importlib.metadata.version(
+        _BACKEND_MODULE[backend])
+
 
 def test_a_bundle_whose_baseline_meta_predates_this_field_still_reads(counts_bundle_inputs,
                                                                      tmp_path):

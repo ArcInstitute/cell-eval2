@@ -852,8 +852,8 @@ def test_validate_input_type_now_REJECTS_the_near_integer_route():
 
     So this test proves BOTH halves, and it needs both. The arithmetic exposure is unchanged and
     still real: reached here through `allow_fractional=True`, which the tiled baseline leg depends
-    on -- one of three remaining ways in, the others being a sub-1e-6 deviation and the partitioned
-    or direct-shard drivers, which never call `validate_input_type` at all (see
+    on -- one of three remaining ways in, the others being a sub-1e-6 deviation and the
+    direct-shard drivers, which never call `validate_input_type` at all (see
     `prep._grouped_sums`' exposure list). What changed is that THIS submission can no longer get
     there through the strict gate. Deleting the divergence half would leave the repo with no record
     of why an absolute tolerance was worth a behaviour change so close to the freeze."""

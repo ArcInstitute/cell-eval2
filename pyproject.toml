@@ -1,6 +1,6 @@
 [project]
 name = "cell-eval2"
-version = "0.21.0"
+version = "0.22.0"
 description = "Clean, streamlined, GPU-accelerated reimplementation of cell-eval"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -81,7 +81,9 @@ gpu = ["cupy-cuda12x", "nvidia-nvcomp-cu12<6"]
 # The 0.3.0 notes recorded a `[gpudge]` extra as future work, blocked on gpudge requiring Python
 # >=3.12 while cell_eval2 supports >=3.11. Both halves are gone: 0.9.0 is on PyPI (2026-08-19) as
 # a pure-Python `py3-none-any` wheel with `Requires-Python: >=3.11`.
-gpudge = ["gpudge>=0.9.0"]
+# EXACT pin: `settings.de.engine` records the engine name only, so this pin fixes the engine
+# version. Nothing checks it at runtime; a bump is a cell_eval2 release.
+gpudge = ["gpudge==0.9.1"]
 
 [project.scripts]
 cell-eval2 = "cell_eval2.cli:main"
